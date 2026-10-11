@@ -280,6 +280,9 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             const actions = AutomationWidgetMethods(Runtime).canvasWidgetActionsForId(self, index, action.id) orelse return error.InvalidCommand;
+            if (self.views[index].canvasWidgetAccessibilityModalIndex()) |modal| {
+                if (!self.views[index].canvasWidgetIdDescendsFromIndex(action.id, modal)) return error.InvalidCommand;
+            }
             if (!canvasWidgetAccessibilityActionSupported(actions, action.action)) return error.InvalidCommand;
 
             // Session recording, outer-wins on BOTH entry surfaces: the

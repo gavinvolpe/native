@@ -981,6 +981,24 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return canvasWidgetTopmostAnchoredSurfaceIndexInScope(self, .any);
         }
 
+        /// Accessibility follows the topmost visible modal's subtree, not
+        /// the background controls still painted beneath its scrim.
+        pub fn canvasWidgetAccessibilityModalIndex(self: *const RuntimeView) ?usize {
+            const layout = self.widgetLayoutTree();
+            var found: ?usize = null;
+            var found_order: ?canvas.WidgetPaintOrder = null;
+            for (layout.nodes, 0..) |node, index| {
+                if (!canvas.widgetIsRootRelativeModal(node.widget) or !node.widget.scrim) continue;
+                if (canvasWidgetNodeHiddenInTree(self, index) or canvas.isWidgetConcealedByDisclosure(layout, index)) continue;
+                const order = canvas.widgetLayoutWindowSurfaceOrder(layout, index, self.widget_tokens);
+                if (found_order == null or canvas.widgetPaintOrderLess(found_order.?, order)) {
+                    found = index;
+                    found_order = order;
+                }
+            }
+            return found;
+        }
+
         fn canvasWidgetTopmostAnchoredSurfaceIndexInScope(self: *const RuntimeView, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             var found: ?usize = null;
             var found_order: ?canvas.WidgetPaintOrder = null;

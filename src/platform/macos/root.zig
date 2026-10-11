@@ -2159,7 +2159,8 @@ fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform_mod.Widget
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     if (snapshot.nodes.len > platform_mod.max_widget_accessibility_nodes) return error.InvalidViewOptions;
-    var nodes: [platform_mod.max_widget_accessibility_nodes]AppKitWidgetAccessibilityNode = undefined;
+    const nodes = try std.heap.page_allocator.alloc(AppKitWidgetAccessibilityNode, snapshot.nodes.len);
+    defer std.heap.page_allocator.free(nodes);
     for (snapshot.nodes, 0..) |node, index| {
         nodes[index] = .{
             .id = node.id,

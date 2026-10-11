@@ -180,7 +180,7 @@ pub const max_registered_canvas_font_bytes: usize = 24 * 1024 * 1024;
 // enumeration; a test in canvas_widget_layout_tests.zig keeps them in
 // lockstep.
 pub const max_canvas_widget_nodes_per_view: usize = 1024;
-pub const max_canvas_widget_semantics_per_view: usize = 1024;
+pub const max_canvas_widget_semantics_per_view: usize = @import("../platform/types.zig").max_widget_accessibility_nodes;
 // Raised from 2048 with the inline-span/markdown work, then from 64 KiB for
 // editable code surfaces: a simple editor must retain a practical source
 // file (roughly 10k ordinary code lines) plus the surrounding view chrome.

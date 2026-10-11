@@ -48,6 +48,179 @@ const jsonBoolField = support.jsonBoolField;
 const canvasRenderAnimationFinalOverrideNoop = support.canvasRenderAnimationFinalOverrideNoop;
 const copyInto = support.copyInto;
 const writeViewJson = support.writeViewJson;
+
+const AccessibilityPublisher = @import("canvas_widget_display.zig").RuntimeCanvasWidgetDisplay(Runtime);
+
+const AccessibilityCapture = struct {
+    ids: [1024]u64 = undefined,
+    parents: [1024]?u64 = undefined,
+    count: usize = 0,
+    updates: usize = 0,
+    fail: bool = false,
+    runtime: ?*Runtime = null,
+    reenter_view: ?usize = null,
+
+    fn platformValue(self: *@This()) platform.Platform {
+        return .{
+            .context = self,
+            .name = "accessibility-capture",
+            .surface_value = .{ .id = 1, .size = geometry.SizeF.init(320, 240), .scale_factor = 1 },
+            .run_fn = run,
+            .services = .{
+                .context = self,
+                .load_webview_fn = loadWebView,
+                .create_view_fn = createView,
+                .focus_view_fn = focusView,
+                .update_widget_accessibility_fn = update,
+            },
+        };
+    }
+
+    fn run(_: *anyopaque, _: platform.EventHandler, _: *anyopaque) anyerror!void {}
+    fn loadWebView(_: ?*anyopaque, _: platform.WebViewSource) anyerror!void {}
+    fn createView(_: ?*anyopaque, _: platform.ViewOptions) anyerror!void {}
+    fn focusView(_: ?*anyopaque, _: platform.WindowId, _: []const u8) anyerror!void {}
+
+    fn update(context: ?*anyopaque, snapshot: platform.WidgetAccessibilitySnapshot) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.fail) return error.TestPublishFailed;
+        if (self.reenter_view) |index| {
+            self.reenter_view = null;
+            const first = snapshot.nodes[0].id;
+            const last = snapshot.nodes[snapshot.nodes.len - 1].id;
+            try AccessibilityPublisher.publishCanvasWidgetAccessibility(self.runtime.?, index);
+            try std.testing.expectEqual(first, snapshot.nodes[0].id);
+            try std.testing.expectEqual(last, snapshot.nodes[snapshot.nodes.len - 1].id);
+        }
+        try std.testing.expect(snapshot.nodes.len <= self.ids.len);
+        self.count = snapshot.nodes.len;
+        self.updates += 1;
+        for (snapshot.nodes, 0..) |node, index| {
+            self.ids[index] = node.id;
+            self.parents[index] = node.parent_id;
+        }
+    }
+
+    fn start(self: *@This(), runtime: *Runtime) !void {
+        Runtime.initAt(runtime, .{ .platform = self.platformValue(), .allocator = std.testing.allocator });
+        self.runtime = runtime;
+        try runtime.dispatchPlatformEvent(self.app(), .app_start);
+        _ = try runtime.createView(.{
+            .window_id = 1,
+            .label = "canvas",
+            .kind = .gpu_surface,
+            .frame = geometry.RectF.init(0, 0, 320, 240),
+        });
+    }
+
+    fn app(self: *@This()) App {
+        return .{ .context = self, .name = "accessibility-capture", .source = platform.WebViewSource.html("<h1>Accessibility</h1>") };
+    }
+};
+
+test "runtime publishes all 1024 retained semantics beyond the old accessibility cap" {
+    var capture: AccessibilityCapture = .{};
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    try capture.start(runtime);
+    defer runtime.deinit();
+    const widgets = try std.testing.allocator.alloc(canvas.Widget, 1023);
+    defer std.testing.allocator.free(widgets);
+    const layout_nodes = try std.testing.allocator.alloc(canvas.WidgetLayoutNode, 1024);
+    defer std.testing.allocator.free(layout_nodes);
+    for (widgets, 0..) |*widget, index| {
+        widget.* = .{
+            .id = @intCast(index + 2),
+            .kind = .stack,
+            .semantics = .{ .role = .group, .label = "Retained control" },
+        };
+    }
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = widgets }, geometry.RectF.init(0, 0, 320, 240), layout_nodes);
+    _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const retained = try runtime.canvasWidgetSemantics(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 1024), retained.len);
+    try std.testing.expectEqual(retained.len, capture.count);
+    for (retained, 0..) |node, index| try std.testing.expectEqual(node.id, capture.ids[index]);
+    try std.testing.expectEqual(@as(u64, 1024), capture.ids[capture.count - 1]);
+    try std.testing.expectEqual(@as(?u64, 1), capture.parents[capture.count - 1]);
+
+    const before = capture.updates;
+    try AccessibilityPublisher.publishCanvasWidgetAccessibility(runtime, 0);
+    try std.testing.expectEqual(before, capture.updates);
+    runtime.views[0].widget_semantics_nodes[1023].label = "Changed after node 64";
+    runtime.canvas_widget_accessibility_defer_depth = 1;
+    try AccessibilityPublisher.publishCanvasWidgetAccessibility(runtime, 0);
+    try std.testing.expect(runtime.views[0].widget_accessibility_publish_deferred);
+    try std.testing.expectEqual(before, capture.updates);
+    runtime.canvas_widget_accessibility_defer_depth = 0;
+    try AccessibilityPublisher.flushDeferredCanvasWidgetAccessibility(runtime);
+    try std.testing.expectEqual(before + 1, capture.updates);
+    try std.testing.expectEqual(retained.len, capture.count);
+
+    const published_hash = runtime.views[0].widget_accessibility_published_hash;
+    runtime.views[0].widget_semantics_nodes[1023].label = "Retry after failure";
+    capture.fail = true;
+    try std.testing.expectError(error.TestPublishFailed, AccessibilityPublisher.publishCanvasWidgetAccessibility(runtime, 0));
+    try std.testing.expectEqual(published_hash, runtime.views[0].widget_accessibility_published_hash);
+    capture.fail = false;
+    try AccessibilityPublisher.publishCanvasWidgetAccessibility(runtime, 0);
+    try std.testing.expectEqual(before + 2, capture.updates);
+
+    _ = try runtime.createView(.{ .window_id = 1, .label = "nested", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 100, 100) });
+    var nested_nodes: [1]canvas.WidgetLayoutNode = undefined;
+    const nested_layout = try canvas.layoutWidgetTree(.{ .id = 9999, .kind = .button, .text = "Nested" }, geometry.RectF.init(0, 0, 100, 100), &nested_nodes);
+    _ = try runtime.setCanvasWidgetLayout(1, "nested", nested_layout);
+    runtime.views[1].widget_accessibility_published = false;
+    runtime.views[0].widget_accessibility_published = false;
+    capture.reenter_view = 1;
+    try AccessibilityPublisher.publishCanvasWidgetAccessibility(runtime, 0);
+    try std.testing.expectEqual(@as(usize, 1024), capture.count);
+
+    const oversized = try std.testing.allocator.alloc(platform.WidgetAccessibilityNode, 1025);
+    defer std.testing.allocator.free(oversized);
+    try std.testing.expectError(error.InvalidViewOptions, runtime.options.platform.services.updateWidgetAccessibility(.{ .window_id = 1, .view_label = "canvas", .nodes = oversized }));
+    try std.testing.expectError(error.InvalidViewOptions, runtime.options.platform.services.updateWidgetAccessibility(.{ .window_id = 1, .view_label = "", .nodes = &.{} }));
+}
+
+test "runtime publishes only the active modal and refuses stale background accessibility actions" {
+    var capture: AccessibilityCapture = .{};
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    try capture.start(runtime);
+    defer runtime.deinit();
+    const controls = [_]canvas.Widget{
+        .{ .id = 11, .kind = .text_field, .frame = geometry.RectF.init(8, 8, 120, 28), .text = "Dialog input", .autofocus = true },
+        .{ .id = 12, .kind = .button, .frame = geometry.RectF.init(8, 44, 120, 28), .text = "Cancel" },
+    };
+    var widgets = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 80, 28), .text = "Background" },
+        .{ .id = 10, .kind = .dialog, .frame = geometry.RectF.init(0, 0, 200, 120), .children = &controls },
+        .{ .id = 20, .kind = .sheet, .layer = 1, .frame = geometry.RectF.init(0, 0, 200, 120), .text = "Lower modal" },
+    };
+    var nodes: [6]canvas.WidgetLayoutNode = undefined;
+    var layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &widgets }, geometry.RectF.init(0, 0, 320, 240), &nodes);
+    _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try std.testing.expectEqualSlices(u64, &.{ 10, 11, 12 }, capture.ids[0..capture.count]);
+    try std.testing.expectEqual(@as(?u64, null), capture.parents[0]);
+    try std.testing.expectEqual(@as(?u64, 10), capture.parents[1]);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 11), runtime.views[0].canvas_widget_focused_id);
+    try runtime.dispatchPlatformEvent(capture.app(), .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 12), runtime.views[0].canvas_widget_focused_id);
+    try runtime.dispatchPlatformEvent(capture.app(), .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 11), runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectError(error.InvalidCommand, runtime.dispatchCanvasWidgetAccessibilityAction(capture.app(), 1, "canvas", .{ .id = 2, .action = .focus }));
+    try std.testing.expectError(error.InvalidCommand, runtime.dispatchCanvasWidgetAccessibilityAction(capture.app(), 1, "canvas", .{ .id = 2, .action = .press }));
+    _ = try runtime.dispatchCanvasWidgetAccessibilityAction(capture.app(), 1, "canvas", .{ .id = 12, .action = .focus });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 12), runtime.views[0].canvas_widget_focused_id);
+
+    widgets[1].semantics.hidden = true;
+    widgets[2].scrim = false;
+    layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &widgets }, geometry.RectF.init(0, 0, 320, 240), &nodes);
+    _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 20 }, capture.ids[0..capture.count]);
+    _ = try runtime.dispatchCanvasWidgetAccessibilityAction(capture.app(), 1, "canvas", .{ .id = 2, .action = .focus });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), runtime.views[0].canvas_widget_focused_id);
+}
 const canvasFrameScratchStorage = support.canvasFrameScratchStorage;
 const runtimeViewInfo = support.runtimeViewInfo;
 const runtimeViewCanvasFrameRenderOverrides = support.runtimeViewCanvasFrameRenderOverrides;

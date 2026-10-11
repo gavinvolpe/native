@@ -211,10 +211,19 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // profiling is on.
             const a11y_begin = self.frame_profile.begin();
             defer self.frame_profile.end(.a11y, a11y_begin);
-            var nodes: [platform.max_widget_accessibility_nodes]platform.WidgetAccessibilityNode = undefined;
             const semantics = view.widgetSemantics();
-            const count = @min(semantics.len, nodes.len);
-            for (semantics[0..count], 0..) |node, index| {
+            const allocator = self.owned_allocator;
+            // Per-call ownership keeps nested host callbacks from overwriting
+            // a snapshot that is still being consumed, without UI-stack arrays.
+            const nodes = try allocator.alloc(platform.WidgetAccessibilityNode, semantics.len);
+            defer allocator.free(nodes);
+            const modal_index = view.canvasWidgetAccessibilityModalIndex();
+            var count: usize = 0;
+            for (semantics) |node| {
+                if (modal_index) |modal| {
+                    if (!view.canvasWidgetIdDescendsFromIndex(node.id, modal)) continue;
+                }
+                const parent_id = canvasWidgetSemanticParentId(semantics, node.parent_index);
                 const focused = node.state.focused or (view.keyboard_active and view.focused and node.id == view.canvas_widget_focused_id);
                 // Native menu validation only consults the focused editor.
                 // Resolving history for that one node also avoids searching
@@ -223,9 +232,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                     view.canvasWidgetTextHistoryAvailability(node.id)
                 else
                     view_widget_text.CanvasWidgetTextHistoryAvailability{};
-                nodes[index] = .{
+                nodes[count] = .{
                     .id = node.id,
-                    .parent_id = canvasWidgetSemanticParentId(semantics, node.parent_index),
+                    .parent_id = if (modal_index) |modal|
+                        if (parent_id != null and view.canvasWidgetIdDescendsFromIndex(parent_id.?, modal)) parent_id else null
+                    else
+                        parent_id,
                     .role = platformWidgetAccessibilityRole(node.role),
                     .label = node.label,
                     .text_value = node.text_value,
@@ -257,6 +269,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                     .focusable = node.focusable,
                     .actions = platformWidgetAccessibilityActions(node.actions),
                 };
+                count += 1;
             }
             // Publish only when the assembled tree actually changed: the
             // fingerprint covers every field the platform receives, so

@@ -440,13 +440,13 @@ test "a full registry fails the load with registry_full, never silence" {
 }
 
 test "a registry allocation failure fails the load with alloc_failed, never decode_failed" {
-    // The registry allocates each slot's pixel buffer lazily, at the
-    // slot's first registration, from the runtime's frozen allocator —
-    // so a FailingAllocator there is exactly an OOM at registration
-    // time: AFTER a successful decode, with perfectly valid bytes. The
-    // load's terminal must say resource exhaustion (`alloc_failed`),
-    // never report the bytes corrupt (`decode_failed`).
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    // Fail only the registry's slot-buffer allocation. The result drain
+    // rebuilds the view afterward, so its accessibility snapshot must
+    // still be able to allocate.
+    var failing: ImageBufferFailingAllocator = .{
+        .backing = std.testing.allocator,
+        .fail_len = canvas_limits.max_registered_canvas_image_pixel_bytes,
+    };
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
@@ -495,13 +495,10 @@ test "a registry allocation failure fails the load with alloc_failed, never deco
     const encoded = encodePngFixture(&encoded_buffer, 1, 1);
     try app_state.dispatch(&harness.runtime, 1, .start);
     try app_state.effects.feedImageBytes(image_id, encoded);
-    // Exhaust the runtime allocator before the drain delivers: the
-    // registry's lazy slot-buffer allocation is the next (and only)
-    // runtime allocation on the decode+register path.
-    failing.fail_index = failing.alloc_index;
     while (harness.null_platform.takeWake()) |_| {}
+    failing.armed = true;
     try harness.runtime.dispatchPlatformEvent(app, .wake);
-    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expect(!failing.armed);
     try std.testing.expectEqual(@as(usize, 1), app_state.model.result_count);
     try std.testing.expectEqual(effects_mod.EffectImageOutcome.alloc_failed, app_state.model.last.?.outcome);
     try std.testing.expect(harness.runtime.registeredCanvasImage(image_id) == null);
@@ -1214,13 +1211,11 @@ test "an image terminal still undelivered occupies its id against a spawn of the
     try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingSpawnCount());
 }
 
-/// Fails exactly one allocation — the next one matching the staged
-/// image source buffer's distinctive size — and delegates everything
-/// else. `std.testing.FailingAllocator` fails every allocation from
-/// its fail index on, which would take the same dispatch's view
-/// rebuild down with the load; this failure is surgical.
+/// Fails exactly one allocation matching the configured buffer size and
+/// delegates everything else.
 const ImageBufferFailingAllocator = struct {
     backing: std.mem.Allocator,
+    fail_len: usize = effects_mod.max_effect_image_bytes + 1,
     armed: bool = false,
 
     const vtable: std.mem.Allocator.VTable = .{
@@ -1236,7 +1231,7 @@ const ImageBufferFailingAllocator = struct {
 
     fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
-        if (self.armed and len == effects_mod.max_effect_image_bytes + 1) {
+        if (self.armed and len == self.fail_len) {
             self.armed = false;
             return null;
         }
