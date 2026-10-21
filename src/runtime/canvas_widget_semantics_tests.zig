@@ -937,6 +937,129 @@ test "failed automation focus reveal preserves ancestor scroll and prior focus" 
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
 }
 
+const ReflowEditorFixture = struct {
+    const Mode = enum { normal, removed, disabled, hidden };
+    notice: bool = false,
+    mode: Mode = .normal,
+    text_target: canvas.ObjectId = 0,
+
+    fn app(self: *@This()) App {
+        return .{ .context = self, .name = "reflow-editor", .source = platform.WebViewSource.html("<h1>Editor</h1>"), .event_fn = event };
+    }
+
+    fn render(self: *@This(), runtime: *Runtime) !void {
+        const band: f32 = if (self.notice) 44 else 0;
+        const content = [_]canvas.Widget{
+            .{ .id = 2, .kind = .text_field, .frame = geometry.RectF.init(0, 800, 160, 32), .text = "before", .state = .{ .disabled = self.mode == .disabled }, .semantics = .{ .hidden = self.mode == .hidden } },
+            .{ .id = 3, .kind = .text, .frame = geometry.RectF.init(0, 2000, 160, 32), .text = "End" },
+        };
+        const children = [_]canvas.Widget{
+            .{ .id = 4, .kind = .text, .frame = geometry.RectF.init(0, 0, 180, band), .text = if (self.notice) "Notice" else "" },
+            .{ .id = 1, .kind = .scroll_view, .frame = geometry.RectF.init(0, band, 180, 768 - band), .children = if (self.mode == .removed) content[1..] else &content },
+        };
+        var nodes: [5]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = if (self.notice) &children else children[1..] }, geometry.RectF.init(0, 0, 180, 768), &nodes);
+        _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    }
+
+    fn event(context: *anyopaque, runtime: *Runtime, value: Event) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        switch (value) {
+            .canvas_widget_keyboard => |event_value| {
+                if (event_value.keyboard.phase == .key_down and std.mem.eql(u8, event_value.keyboard.key, "a") and !self.notice) {
+                    self.notice = true;
+                    try self.render(runtime);
+                }
+                if (event_value.keyboard.phase == .text_input) {
+                    self.text_target = if (event_value.target) |target| target.id else 0;
+                }
+            },
+            else => {},
+        }
+    }
+};
+
+test "automation set text survives notice reflow of its focused editor" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var fixture: ReflowEditorFixture = .{};
+    const app = fixture.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 180, 768) });
+    try fixture.render(&harness.runtime);
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .focus });
+    const before = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 736), before.findById(2).?.frame.y);
+    try std.testing.expectEqual(@as(f32, 768), before.findById(2).?.frame.maxY());
+    const ring = harness.runtime.views[0].canvas_widget_focus_visible_id;
+    const keyboard_ring = harness.runtime.views[0].canvas_widget_focus_visible_keyboard;
+
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .set_text, .text = "after" });
+    const after = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(fixture.notice);
+    try std.testing.expectEqual(@as(f32, 724), after.findById(1).?.frame.height);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), fixture.text_target);
+    try std.testing.expectEqualStrings("after", after.findById(2).?.widget.text);
+    try std.testing.expect(after.findById(2).?.frame.maxY() <= after.findById(1).?.frame.maxY());
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(ring, harness.runtime.views[0].canvas_widget_focus_visible_id);
+    try std.testing.expectEqual(keyboard_ring, harness.runtime.views[0].canvas_widget_focus_visible_keyboard);
+}
+
+test "unchanged editor rebuild preserves deliberate partial scroll positioning" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var fixture: ReflowEditorFixture = .{};
+    const app = fixture.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 180, 768) });
+    try fixture.render(&harness.runtime);
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .focus });
+    const view = &harness.runtime.views[0];
+    try std.testing.expectEqual(@as(f32, 64), view.canvasWidgetScrollStateById(1).?.offset_y);
+    _ = try view.applyCanvasWidgetScrollDriverOffset(view.canvasWidgetNodeIndexById(1).?, 0, 814);
+    view.reconcileCanvasWidgetRenderStateAfterScroll(null);
+    const positioned = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, -14), positioned.findById(2).?.frame.y);
+    try std.testing.expectEqual(@as(f32, 18), positioned.findById(2).?.frame.maxY());
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), view.canvas_widget_focused_id);
+
+    try fixture.render(&harness.runtime);
+    try std.testing.expectEqual(@as(f32, 814), view.canvasWidgetScrollStateById(1).?.offset_y);
+    const rebuilt = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, -14), rebuilt.findById(2).?.frame.y);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), view.canvas_widget_focused_id);
+}
+
+test "editor reflow does not restore removed disabled hidden or deliberately scrolled focus" {
+    for ([_]ReflowEditorFixture.Mode{ .removed, .disabled, .hidden, .normal }) |mode| {
+        const harness = try TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var fixture: ReflowEditorFixture = .{};
+        const app = fixture.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 180, 768) });
+        try fixture.render(&harness.runtime);
+        _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .focus });
+        if (mode == .normal) {
+            const view = &harness.runtime.views[0];
+            _ = try view.applyCanvasWidgetScrollDriverOffset(view.canvasWidgetNodeIndexById(1).?, 0, 900);
+            view.reconcileCanvasWidgetRenderStateAfterScroll(null);
+            try std.testing.expectEqual(@as(f32, 900), view.canvasWidgetScrollStateById(1).?.offset_y);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focused_id);
+        }
+        fixture.mode = mode;
+        fixture.notice = true;
+        try fixture.render(&harness.runtime);
+        try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focused_id);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .text_input, .text = "discarded" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 0), fixture.text_target);
+    }
+}
+
 test "automation focus reveals an offscreen field and its end caret" {
     const TestApp = struct {
         scroll_event_count: u32 = 0,
