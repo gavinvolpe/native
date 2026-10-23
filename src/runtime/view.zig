@@ -885,6 +885,7 @@ pub const RuntimeView = struct {
     pub const applyCanvasWidgetScrollKeyboardTarget = CanvasWidgetScrollMethods.applyCanvasWidgetScrollKeyboardTarget;
     pub const canScrollCanvasWidgetIntoView = CanvasWidgetScrollMethods.canScrollCanvasWidgetIntoView;
     pub const scrollCanvasWidgetIntoView = CanvasWidgetScrollMethods.scrollCanvasWidgetIntoView;
+    pub const scrollCanvasWidgetRectIntoView = CanvasWidgetScrollMethods.scrollCanvasWidgetRectIntoView;
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;
     pub const canvasWidgetScrollContentExtentX = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtentX;
@@ -1310,7 +1311,11 @@ pub const RuntimeView = struct {
         self.copyCanvasDisplayList(source.canvasDisplayList()) catch unreachable;
         self.canvas_revision = source.canvas_revision;
         self.copyPresentedCanvasSummaryFrom(source);
-        self.copyWidgetLayoutTree(source.widgetLayoutTree(), scratch) catch unreachable;
+        // The clone adopts the source view's OWN retained tree: no
+        // declared render is involved, so there is no authored-scroll
+        // verdict to honor — the reveal protection is a declared-render
+        // rule and this copy carries none (neutral).
+        self.copyWidgetLayoutTree(source.widgetLayoutTree(), scratch, false) catch unreachable;
         self.widget_revision = source.widget_revision;
         @memcpy(self.widget_scroll_states[0..source.widget_layout_node_count], source.widget_scroll_states[0..source.widget_layout_node_count]);
     }

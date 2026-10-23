@@ -183,7 +183,23 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // that hover currency must treat as adopted-and-stale,
             // while the copy's up-front validation rejects with the
             // witness unmoved.
-            try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
+            // Authored scroll intent, judged at the reconcile boundary,
+            // where the incoming DECLARED tree still exists: whether one
+            // of the focused editor's scroll ancestors moved its declared
+            // offset this render (programmatic scroll — the request wins,
+            // so the adoption reveal inside the copy must not read the
+            // resulting clip as accidental and scroll the editor back).
+            // Effective offsets cannot carry this: viewport/content clamps
+            // move them with no authored change. Scoped to the focused
+            // editor's own ancestor chain — unrelated sibling scrolls
+            // never enter the verdict.
+            const focused_scroll_source_moved = canvas_widget_runtime.canvasWidgetFocusedScrollSourceMoved(
+                previous_layout.nodes,
+                layout,
+                self.views[index].widgetSourceScrollEntries(),
+                self.views[index].canvas_widget_focused_id,
+            );
+            try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch, focused_scroll_source_moved);
             try self.views[index].copyCanvasWidgetSourceText(layout);
             self.views[index].copyCanvasWidgetSourceScroll(layout);
             self.views[index].copyCanvasWidgetSourceControls(layout);

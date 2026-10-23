@@ -225,7 +225,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// `scratch` is reconcile scratch too large for the stack at the
         /// 1024-node budget; callers pass the Runtime's shared
         /// `canvas_widget_copy_scratch` (the event loop is single-threaded).
-        pub fn copyWidgetLayoutTree(self: *RuntimeView, layout: canvas.WidgetLayoutTree, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch) anyerror!void {
+        pub fn copyWidgetLayoutTree(self: *RuntimeView, layout: canvas.WidgetLayoutTree, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch, focused_scroll_source_moved: bool) anyerror!void {
             if (layout.nodes.len > self.widget_layout_nodes.len) return error.WidgetNodeLimitReached;
             var anchored_count: usize = 0;
             for (layout.nodes) |node| {
@@ -324,7 +324,6 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 canvasWidgetVisibleLocalBounds(self.widgetLayoutTree(), self.canvasWidgetNodeIndexById(self.canvas_widget_focused_id).?)
             else
                 null;
-
             // ADOPTION begins here: the pool resets below are
             // destructive, and a later per-node failure (an invalid
             // command name escapes the pre-validation) leaves a TORN
@@ -389,7 +388,31 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                     {
                         const visible = canvasWidgetVisibleLocalBounds(retained, focused_index);
                         if (visible == null or !visible.?.containsRect(previously_visible)) {
-                            _ = try self.scrollCanvasWidgetIntoView(self.canvas_widget_focused_id);
+                            // A SOURCE-declared offset change is programmatic
+                            // scroll: the request wins by the scroll reconcile
+                            // rule, and the reveal must not read the resulting
+                            // clip as accidental and scroll the editor back.
+                            // The verdict arrives explicitly from the
+                            // reconcile boundary, where the DECLARED values
+                            // still exist — this copy sees only the
+                            // reconciled tree, whose offsets the
+                            // restore/clamp passes have already moved.
+                            if (!focused_scroll_source_moved) {
+                                // Reveal the region that WAS visible, not the
+                                // whole frame: an editor taller than its
+                                // viewport keeps its visible end/caret region
+                                // with the minimum scroll that restores it,
+                                // instead of aligning the full frame to the
+                                // viewport top.
+                                const frame = retained.nodes[focused_index].frame.normalized();
+                                const region = geometry.RectF.init(
+                                    frame.x + previously_visible.x,
+                                    frame.y + previously_visible.y,
+                                    previously_visible.width,
+                                    previously_visible.height,
+                                );
+                                _ = try self.scrollCanvasWidgetRectIntoView(self.canvas_widget_focused_id, region);
+                            }
                         }
                     }
                 }

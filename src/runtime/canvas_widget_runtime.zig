@@ -195,6 +195,117 @@ pub fn canvasWidgetSourceScrollEntryById(entries: []const CanvasWidgetSourceScro
     return null;
 }
 
+/// Whether the focused editor's scroll ancestors carry a SOURCE-declared
+/// (programmatic) offset change into this rebuild: one of them moved its
+/// DECLARED offset since the previous render's declared entries, joined
+/// the tree fresh, or left it (the chain changed wholesale). The scroll
+/// reconcile rule lets such a request win, so the adoption-time reveal
+/// must not read the resulting clip as accidental and scroll the editor
+/// back into view. DECLARED values only — effective offsets also move
+/// under viewport/content clamps, which is reflow to repair, not authored
+/// scroll to honor. Scoped to the focused editor's OWN ancestor chain:
+/// unrelated sibling scrolls never enter the verdict, and the walk is
+/// bounded by the tree itself, not a new cap.
+pub fn canvasWidgetFocusedScrollSourceMoved(
+    previous_nodes: []const canvas.WidgetLayoutNode,
+    declared: canvas.WidgetLayoutTree,
+    previous_source_entries: []const CanvasWidgetSourceScrollEntry,
+    focused_id: canvas.ObjectId,
+) bool {
+    if (focused_id == 0) return false;
+    var focused_index: ?usize = null;
+    for (previous_nodes, 0..) |node, index| {
+        if (node.widget.id == focused_id) {
+            focused_index = index;
+            break;
+        }
+    }
+    const start = focused_index orelse return false;
+
+    // The chain the user just experienced: an ancestor that left this
+    // chain (or stopped being a scroll view) changes it wholesale, and a
+    // DECLARED offset move on one of them is the authored scroll channel.
+    var current: ?usize = previous_nodes[start].parent_index;
+    while (current) |ancestor_index| {
+        if (ancestor_index >= previous_nodes.len) break;
+        const ancestor = previous_nodes[ancestor_index];
+        // Window-level surfaces escape ancestor clips rather than
+        // scrolling with their source branch.
+        if (canvas.widgetEscapesAncestorClips(ancestor.widget)) break;
+        if (ancestor.widget.kind == .scroll_view and ancestor.widget.id != 0) {
+            // A scroll ancestor that left the declared tree (or stopped
+            // being one) changes the chain wholesale: never undo the
+            // adoption.
+            const declared_node = declared.findById(ancestor.widget.id) orelse return true;
+            if (declared_node.widget.kind != .scroll_view) return true;
+            const previous_source = canvasWidgetSourceScrollEntryById(previous_source_entries, ancestor.widget.id);
+            const moved_y = previous_source == null or declared_node.widget.value != previous_source.?.value;
+            const moved_x = previous_source == null or declared_node.widget.value_x != previous_source.?.value_x;
+            if (moved_y or moved_x) return true;
+        }
+        current = previous_nodes[ancestor_index].parent_index;
+    }
+
+    // The chain the adoption is about to install: a fresh or reparented
+    // scroll wrapper never appears in the old chain, so only this walk
+    // can see its authored offset applying to the editor for the first
+    // time.
+    var declared_focused_index: ?usize = null;
+    for (declared.nodes, 0..) |node, index| {
+        if (node.widget.id == focused_id) {
+            declared_focused_index = index;
+            break;
+        }
+    }
+    if (declared_focused_index) |declared_start| {
+        var declared_current: ?usize = declared.nodes[declared_start].parent_index;
+        while (declared_current) |ancestor_index| {
+            if (ancestor_index >= declared.nodes.len) break;
+            const ancestor = declared.nodes[ancestor_index];
+            // Window-level surfaces escape ancestor clips rather than
+            // scrolling with their source branch.
+            if (canvas.widgetEscapesAncestorClips(ancestor.widget)) break;
+            if (ancestor.widget.kind == .scroll_view and ancestor.widget.id != 0) {
+                // Ancestors the old-chain walk above already judged.
+                if (focusedScrollAncestorInChain(previous_nodes, start, ancestor.widget.id)) {
+                    declared_current = declared.nodes[ancestor_index].parent_index;
+                    continue;
+                }
+                const previous_source = canvasWidgetSourceScrollEntryById(previous_source_entries, ancestor.widget.id);
+                if (previous_source == null) {
+                    // Fresh wrapper: authored when it declares an offset
+                    // that displaces content.
+                    if (ancestor.widget.value != 0 or ancestor.widget.value_x != 0) return true;
+                } else {
+                    // Reparented onto an existing region: authored when
+                    // the region's declared offset moved this render, or
+                    // already carries a nonzero offset the editor now
+                    // lands under.
+                    if (ancestor.widget.value != previous_source.?.value or ancestor.widget.value_x != previous_source.?.value_x) return true;
+                    if (ancestor.widget.value != 0 or ancestor.widget.value_x != 0) return true;
+                }
+            }
+            declared_current = declared.nodes[ancestor_index].parent_index;
+        }
+    }
+    return false;
+}
+
+/// Whether `id` is an ancestor of the focused editor in one chain —
+/// re-walked per lookup so the verdict stays free of a second bounded
+/// collection (chains are tree-depth bounded).
+fn focusedScrollAncestorInChain(nodes: []const canvas.WidgetLayoutNode, start: usize, id: canvas.ObjectId) bool {
+    var current: ?usize = nodes[start].parent_index;
+    while (current) |ancestor_index| {
+        if (ancestor_index >= nodes.len) break;
+        const ancestor = nodes[ancestor_index];
+        if (canvas.widgetEscapesAncestorClips(ancestor.widget)) break;
+        if (ancestor.widget.id == id) return true;
+        current = nodes[ancestor_index].parent_index;
+    }
+    return false;
+}
+
 /// Scroll offsets and split fractions share the entry shape (id +
 /// value) and the source-wins reconcile rule, so one collector serves
 /// both.
