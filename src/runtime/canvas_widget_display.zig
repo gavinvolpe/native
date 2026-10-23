@@ -213,11 +213,21 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // profiling is on.
             const a11y_begin = self.frame_profile.begin();
             defer self.frame_profile.end(.a11y, a11y_begin);
-            var nodes: [platform.max_widget_accessibility_nodes]platform.WidgetAccessibilityNode = undefined;
             const semantics = view.widgetSemantics();
-            const count = @min(semantics.len, nodes.len);
+            // Per-call ownership keeps nested host callbacks from overwriting
+            // a snapshot that is still being consumed, without UI-stack
+            // arrays: the whole supported bounded tree (the per-view node
+            // budget) publishes, never a truncated prefix of it. Assembly
+            // rides the same owned allocator as the app's own work, so a
+            // transient OOM skips THIS refresh's publish — nothing is
+            // recorded, the next refresh retries — exactly the failed
+            // -publish contract; accessibility assembly must never fail
+            // the dispatch that triggered it.
+            const nodes = self.owned_allocator.alloc(platform.WidgetAccessibilityNode, semantics.len) catch return;
+            defer self.owned_allocator.free(nodes);
+            const count = semantics.len;
             if (view.widget_tokens.accessibility_policy) |policy| {
-                _ = try accessibility_policy.project(self.owned_allocator, policy, semantics, view.keyboard_active, view.focused, view.canvas_widget_focused_id, view.canvas_widget_hovered_id, view.canvas_widget_pressed_id, &nodes);
+                _ = try accessibility_policy.project(self.owned_allocator, policy, semantics, view.keyboard_active, view.focused, view.canvas_widget_focused_id, view.canvas_widget_hovered_id, view.canvas_widget_pressed_id, nodes);
                 // History availability is an explicit retained-storage query;
                 // the compiled projection chooses which editor is focused.
                 for (nodes[0..count]) |*node| if (node.focused) {
@@ -225,7 +235,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                     node.can_undo = history.can_undo;
                     node.can_redo = history.can_redo;
                 };
-            } else for (semantics[0..count], 0..) |node, index| {
+            } else for (semantics, 0..) |node, index| {
                 const focused = node.state.focused or (view.keyboard_active and view.focused and node.id == view.canvas_widget_focused_id);
                 // Native menu validation only consults the focused editor.
                 // Resolving history for that one node also avoids searching

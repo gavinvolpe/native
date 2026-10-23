@@ -386,7 +386,7 @@ function nscvAccessibility(request: Uint8Array): Uint8Array {
   if (request.length < 40 || request[2]! > 1 || request[3]! > 1) throw new Error("invalid accessibility projection header");
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const count = wire.getUint32(4, true), capacity = wire.getUint32(8, true);
-  if (count > 1024 || capacity > 64 || request.length !== 40 + count * 32 || wire.getUint32(12, true) !== 0) throw new Error("invalid accessibility projection table");
+  if (count > 1024 || capacity > 1024 || request.length !== 40 + count * 32 || wire.getUint32(12, true) !== 0) throw new Error("invalid accessibility projection table");
   const length = Math.min(count, capacity), out = new Uint8Array(8 + length * 28), result = new DataView(out.buffer);
   result.setUint32(0, length, true);
   const roles = [0, 1, 2, 4, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 21, 17, 18, 19, 3, 10, 11, 1];

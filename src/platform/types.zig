@@ -292,7 +292,13 @@ pub const max_menu_key_bytes: usize = 32;
 pub const max_shortcuts: usize = 64;
 pub const max_shortcut_id_bytes: usize = 64;
 pub const max_shortcut_key_bytes: usize = 32;
-pub const max_widget_accessibility_nodes: usize = 64;
+/// The whole supported bounded widget tree a view can publish to
+/// assistive tech: the same budget as the per-view widget node limit, so
+/// every semantic node the app builds can land in the accessibility
+/// snapshot. This is an OWNED-memory budget (publishers allocate
+/// per-call), never a stack array — a 1024-node platform record on the
+/// stack would scale every publishing frame with the node count.
+pub const max_widget_accessibility_nodes: usize = 1024;
 pub const max_gpu_surface_packet_json_bytes: usize = 128 * 1024;
 /// Payload bound for the compact binary gpu-surface packet encoding
 /// (`present_gpu_surface_packet_binary_fn`). Sized so a worst-case

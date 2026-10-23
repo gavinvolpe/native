@@ -1284,6 +1284,143 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expectEqual(published_count, platform_state.update_count);
 }
 
+test "runtime publishes a framed panel subtree inside a vertical scroll past the 64-node cap" {
+    // The live regression: the whole bounded tree a view builds must
+    // reach the platform, never a 64-node prefix of it. A header-sized
+    // budget of nodes leaves the body — a framed panel deep inside a
+    // vertical scroll — unpublished, so assistive tech never sees the
+    // editor body even though it renders and takes pointer input.
+    const CapturePlatform = struct {
+        update_count: usize = 0,
+        nodes: [128]platform.WidgetAccessibilityNode = undefined,
+        node_count: usize = 0,
+
+        fn platformValue(self: *@This()) platform.Platform {
+            return .{
+                .context = self,
+                .name = "widget-a11y-full-tree",
+                .surface_value = .{ .id = 1, .size = geometry.SizeF.init(320, 240), .scale_factor = 1 },
+                .run_fn = run,
+                .services = .{
+                    .context = self,
+                    .load_webview_fn = loadWebView,
+                    .create_view_fn = createView,
+                    .focus_view_fn = focusView,
+                    .update_widget_accessibility_fn = updateWidgetAccessibility,
+                },
+            };
+        }
+
+        fn run(context: *anyopaque, handler: platform.EventHandler, handler_context: *anyopaque) anyerror!void {
+            _ = context;
+            _ = handler;
+            _ = handler_context;
+        }
+
+        fn createView(context: ?*anyopaque, options: platform.ViewOptions) anyerror!void {
+            _ = context;
+            _ = options;
+        }
+
+        fn focusView(context: ?*anyopaque, window_id: platform.WindowId, label: []const u8) anyerror!void {
+            _ = context;
+            _ = window_id;
+            _ = label;
+        }
+
+        fn loadWebView(context: ?*anyopaque, source: platform.WebViewSource) anyerror!void {
+            _ = context;
+            _ = source;
+        }
+
+        fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform.WidgetAccessibilitySnapshot) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.update_count += 1;
+            self.node_count = @min(snapshot.nodes.len, self.nodes.len);
+            for (snapshot.nodes[0..self.node_count], 0..) |node, index| {
+                self.nodes[index] = node;
+            }
+        }
+    };
+
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-a11y-full-tree", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    var platform_state: CapturePlatform = .{};
+    // The Runtime is multi-megabyte; heap-allocate so the test thread's
+    // stack does not overflow (see TestHarness.create).
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    Runtime.initAt(runtime, .{ .platform = platform_state.platformValue() });
+    var app_state: TestApp = .{};
+    try runtime.dispatchPlatformEvent(app_state.app(), .app_start);
+    _ = try runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+    });
+
+    // Sixty-five header rows fill exactly the budget the truncated
+    // publisher stopped at, then the body: a tall framed panel inside a
+    // vertical scroll, its whole subtree past node 64.
+    var rows: [65]canvas.Widget = undefined;
+    for (&rows, 0..) |*row, index| {
+        row.* = .{ .id = 100 + index, .kind = .text, .frame = geometry.RectF.init(8, @as(f32, @floatFromInt(index * 24)), 200, 20), .text = "Row" };
+    }
+    const panel_children = [_]canvas.Widget{
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(8, 8, 120, 32), .text = "New step", .semantics = .{ .label = "New step" } },
+        .{ .id = 5, .kind = .text, .frame = geometry.RectF.init(8, 52, 200, 24), .text = "Search steps" },
+        .{ .id = 6, .kind = .text_field, .frame = geometry.RectF.init(8, 88, 240, 28), .text = "Draft", .placeholder = "Filter steps" },
+    };
+    var scroll_content: [66]canvas.Widget = undefined;
+    for (rows, 0..) |row, index| scroll_content[index] = row;
+    scroll_content[65] = .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(0, 1560, 320, 640), .children = &panel_children };
+    const root = canvas.Widget{
+        .id = 1,
+        .kind = .stack,
+        .children = &[_]canvas.Widget{.{ .id = 2, .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 320, 240), .value = 0, .children = &scroll_content }},
+    };
+    var layout_nodes: [71]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 320, 240), &layout_nodes);
+    _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Every node the view built — header rows, the scroll, the framed
+    // panel, and each of its children — lands in the published snapshot.
+    try std.testing.expect(platform_state.update_count >= 1);
+    try std.testing.expectEqual(@as(usize, 71), platform_state.node_count);
+    const published = platform_state.nodes[0..platform_state.node_count];
+    const panel_node = platformWidgetAccessibilityNodeById(published, 3).?;
+    const button_node = platformWidgetAccessibilityNodeById(published, 4).?;
+    const steps_node = platformWidgetAccessibilityNodeById(published, 5).?;
+    const field_node = platformWidgetAccessibilityNodeById(published, 6).?;
+    const last_row_node = platformWidgetAccessibilityNodeById(published, 164).?;
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.group, panel_node.role);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.button, button_node.role);
+    try std.testing.expectEqualStrings("New step", button_node.label);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.text, steps_node.role);
+    // A plain text widget's string rides its label (text_value is the
+    // editable kinds' live content channel).
+    try std.testing.expectEqualStrings("Search steps", steps_node.label);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.textbox, field_node.role);
+    try std.testing.expectEqualStrings("Filter steps", field_node.placeholder);
+    try std.testing.expectEqual(platform.WidgetAccessibilityRole.text, last_row_node.role);
+    // The tree structure past the cap rides too: the panel hangs under
+    // the scroll and its children under the panel, so the published AX
+    // hierarchy is navigable all the way to the deepest body node.
+    try std.testing.expectEqual(@as(?u64, 2), panel_node.parent_id);
+    try std.testing.expectEqual(@as(?u64, 3), button_node.parent_id);
+    try std.testing.expectEqual(@as(?u64, 3), field_node.parent_id);
+    try std.testing.expectEqual(@as(?u64, 2), last_row_node.parent_id);
+    // The panel rides inside the scroll past the old cap: its published
+    // bounds are the frame the layout gave it, deeper than the viewport
+    // the scroll shows.
+    try std.testing.expect(panel_node.bounds.y >= 1560);
+}
+
 test "runtime automation snapshot exposes canvas icon roles" {
     const TestApp = struct {
         fn app(self: *@This()) App {

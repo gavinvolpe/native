@@ -51,9 +51,21 @@ test("accessibility packets reject malformed lengths, reserved fields and unsupp
   const good = projection([1n]), padded = new Uint8Array(good.length + 8); padded.set(good, 4);
   assert.deepEqual(native_window_policy(padded.subarray(4, 4 + good.length)), native_window_policy(good));
   assert.throws(() => native_window_policy(good.subarray(0, good.length - 1)));
-  for (const [at, value] of [[8, 65], [12, 1], [52, 27], [56, 256], [60, 64], [68, 2048]]) {
+  for (const [at, value] of [[8, 1025], [12, 1], [52, 27], [56, 256], [60, 64], [68, 2048]]) {
     const input = good.slice(); new DataView(input.buffer).setUint32(at!, value!, true);
     assert.throws(() => native_window_policy(input));
   }
   assert.throws(() => native_window_policy(Uint8Array.of(68, 2, 2, 0)));
+});
+
+test("accessibility projection carries the whole bounded tree past the old 64-node cap", () => {
+  const ids = Array.from({ length: 80 }, (_, i) => BigInt(i + 1));
+  const input = projection(ids), wire = new DataView(input.buffer);
+  // The node past the old cap keeps its parent identity: node 66 rides
+  // under node 65, both beyond index 64.
+  wire.setUint32(48 + 65 * 32, 64, true);
+  const output = native_window_policy(input), result = new DataView(output.buffer);
+  assert.equal(result.getUint32(0, true), 80);
+  assert.equal(output.length, 8 + 80 * 28);
+  assert.equal(result.getBigUint64(8 + 65 * 28, true), 65n);
 });
