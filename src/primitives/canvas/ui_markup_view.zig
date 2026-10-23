@@ -1054,7 +1054,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             const saved_chain = scope.source_chain;
             var template_index: usize = 0;
             var args_bytes: []const u8 = "";
-            var forwarded_press: ?MsgT = null;
+            var forwarded_press: *?MsgT = undefined;
             var entry_slot: usize = 0;
             var entry_name: []const u8 = "";
             var payload: ScopeEntry.Payload = undefined;
@@ -1062,13 +1062,16 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 const f = action.fields;
                 switch (action.action) {
                     20 => {
+                        forwarded_press = try ui.arena.create(?MsgT);
+                        forwarded_press.* = null;
                         template_index = f[0];
                         args_bytes = if (f[1] == 0) "" else self.document.templates[template_index].attrs[f[1] - 1].value;
                     },
                     21 => {
-                        var options: Ui.ElementOptions = .{};
-                        try self.applyMessageAttr(scope, node, &options, node.attrs[f[0]]);
-                        forwarded_press = options.on_press;
+                        const options = try ui.arena.create(Ui.ElementOptions);
+                        options.* = .{};
+                        try self.applyMessageAttr(scope, node, options, node.attrs[f[0]]);
+                        forwarded_press.* = options.on_press;
                     },
                     22 => {
                         entry_slot = f[0];
@@ -1099,7 +1102,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                             scope.source_chain = saved_chain;
                         }
                         if (program.next() != null) @panic("trailing template capability");
-                        return self.buildElementForwardedPress(ui, scope, self.document.templates[template_index].children[0], forwarded_press);
+                        return self.buildElementForwardedPress(ui, scope, self.document.templates[template_index].children[0], forwarded_press.*);
                     },
                     255 => return self.failNode(request.nodes.items[f[0]], construction.message(action.code)),
                     else => @panic("invalid template construction action"),
@@ -2474,7 +2477,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             var program = try request.program(owner);
             defer program.deinit();
             var inner = node;
-            var options: Ui.ElementOptions = .{};
+            // Options ride the arena to match the reference lifetime and allocation
+            // order; action 15 follows all shape/admission failures.
+            var options: *Ui.ElementOptions = undefined;
             var children: std.ArrayListUnmanaged(Ui.Node) = .empty;
             var built: ?Ui.Node = null;
             while (program.next()) |step| switch (step.action) {
@@ -2496,7 +2501,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     }
                     inner.children = filtered[0..length];
                 },
-                15 => try self.applyAttrs(scope, node, &options),
+                15 => {
+                    options = try ui.arena.create(Ui.ElementOptions);
+                    options.* = .{};
+                    try self.applyAttrs(scope, node, options);
+                },
                 16 => {
                     var menu_children: std.ArrayListUnmanaged(Ui.Node) = .empty;
                     try self.buildChildList(ui, scope, node.children[step.fields[0]].children, &menu_children);
@@ -2506,7 +2515,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     const name_attr = node.attrs[step.fields[0]];
                     switch (value_programs.iconValue(owner, name_attr.value, markup.icon_name_message)) {
                         .builtin => |name| {
-                            var icon = ui.el(kind, options, .{});
+                            var icon = ui.el(kind, options.*, .{});
                             icon.widget.text = name;
                             return icon;
                         },
@@ -2514,17 +2523,17 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                         .binding => options.icon = try self.stringAttr(scope, node, name_attr, markup.icon_name_message),
                         .invalid => |message| return self.failNode(node, message),
                     }
-                    return ui.el(kind, options, .{});
+                    return ui.el(kind, options.*, .{});
                 },
                 21 => {
-                    var text = ui.el(kind, options, .{});
+                    var text = ui.el(kind, options.*, .{});
                     if (step.fields[0] != 0) text.widget.text = try self.interpolatedText(ui, scope, inner);
                     if (step.fields[1] != 0) text.widget.image_fit = .cover;
                     return text;
                 },
                 22 => try self.buildChildren(ui, scope, inner, &children),
                 23 => try lowerTabsTriggersOwned(owner, children.items),
-                24 => built = ui.el(kind, options, @as([]const Ui.Node, children.items)),
+                24 => built = ui.el(kind, options.*, @as([]const Ui.Node, children.items)),
                 25 => {
                     const pill = node.children[step.fields[0]];
                     built.?.widget.text = try self.interpolatedText(ui, scope, pill);
@@ -2533,7 +2542,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     else
                         .end;
                 },
-                26 => return self.buildSpanParagraph(ui, scope, inner, options),
+                26 => return self.buildSpanParagraph(ui, scope, inner, options.*),
                 255 => return self.failNode(if (step.fields[0] == 0) node else node.children[step.fields[0] - 1], elements.message(step.code)),
                 else => @panic("invalid element construction capability"),
             };
