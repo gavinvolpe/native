@@ -8,6 +8,7 @@ test {
     _ = @import("ui_markup_edit_tests.zig");
     _ = @import("ui_provenance_tests.zig");
     _ = @import("ui_markup_view_tests.zig");
+    _ = @import("ui_markup_view_stack_tests.zig");
     _ = @import("ui_markup_compiled_tests.zig");
     _ = @import("ui_markup_contract_tests.zig");
     _ = @import("ui_markup_huge_model_tests.zig");

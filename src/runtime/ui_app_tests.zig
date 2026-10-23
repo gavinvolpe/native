@@ -2747,6 +2747,327 @@ test "a broken fragment save keeps the last good view and the next good save rec
     try std.testing.expect(app_state.markup_diagnostic == null);
 }
 
+// The deep-fragment lifecycle guard. An app-sized message union (dozens
+// of arms, several carrying multi-kilobyte records) hot-reloads a
+// realistically deep fragment through the same watch harness: the
+// interpreter rebuild the poll performs must stay stack-bounded, and a
+// failed save must reuse the slot's live document — the two-arena swap
+// — rather than rebuild from nothing.
+
+const DeepRecord = struct {
+    bytes: [6144]u8 = @splat(0),
+    len: usize = 0,
+};
+
+const DeepModel = struct {
+    count: u32 = 0,
+};
+
+const DeepMsg = union(enum) {
+    bump,
+    tag0,
+    tag1,
+    tag2,
+    tag3,
+    tag4,
+    tag5,
+    tag6,
+    tag7,
+    tag8,
+    tag9,
+    tag10,
+    tag11,
+    tag12,
+    tag13,
+    tag14,
+    tag15,
+    tag16,
+    tag17,
+    tag18,
+    tag19,
+    tag20,
+    tag21,
+    tag22,
+    tag23,
+    tag24,
+    tag25,
+    tag26,
+    tag27,
+    tag28,
+    tag29,
+    tag30,
+    tag31,
+    tag32,
+    tag33,
+    tag34,
+    tag35,
+    tag36,
+    tag37,
+    tag38,
+    tag39,
+    tag40,
+    tag41,
+    tag42,
+    tag43,
+    tag44,
+    tag45,
+    tag46,
+    tag47,
+    tag48,
+    tag49,
+    tag50,
+    tag51,
+    tag52,
+    tag53,
+    tag54,
+    tag55,
+    tag56,
+    tag57,
+    tag58,
+    tag59,
+    tag60,
+    tag61,
+    tag62,
+    tag63,
+    name0: []const u8,
+    name1: []const u8,
+    name2: []const u8,
+    name3: []const u8,
+    name4: []const u8,
+    name5: []const u8,
+    name6: []const u8,
+    name7: []const u8,
+    bulk0: DeepRecord,
+    bulk1: DeepRecord,
+    bulk2: DeepRecord,
+    bulk3: DeepRecord,
+    bulk4: DeepRecord,
+    bulk5: DeepRecord,
+};
+
+const DeepApp = ui_app_model.UiApp(DeepModel, DeepMsg);
+
+fn deepUpdate(model: *DeepModel, msg: DeepMsg) void {
+    switch (msg) {
+        .bump => model.count += 1,
+        else => {},
+    }
+}
+
+const deep_fragment_baseline =
+    \\<column gap="4">
+    \\  <text>Baseline</text>
+    \\</column>
+;
+
+const DeepBaselineView = canvas.CompiledMarkupView(DeepModel, DeepMsg, deep_fragment_baseline);
+
+fn deepHybridView(ui: *DeepApp.Ui, model: *const DeepModel) DeepApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        DeepBaselineView.build(ui, model),
+    });
+}
+
+const deep_fragment_path = ".zig-cache/ui-app-deep-fragment.native";
+
+const deep_counter_fragments = [_]canvas.MarkupFragment{
+    DeepBaselineView.fragment(deep_fragment_path),
+};
+
+fn deepCounterOptions(io: std.Io) DeepApp.Options {
+    var options: DeepApp.Options = .{
+        .name = "ui-app-deep-counter",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = deepUpdate,
+        .view = deepHybridView,
+    };
+    options.fragment_watch = .{ .fragments = &deep_counter_fragments, .io = io };
+    return options;
+}
+
+const deep_fragment_markup =
+    \\<column gap="2">
+    \\  <text>Count {count}</text>
+    \\  <button on-press="bump">Bump</button>
+    \\  <column gap="2">
+    \\    <text>Level 1</text>
+    \\    <column gap="2">
+    \\      <text>Level 2</text>
+    \\      <column gap="2">
+    \\        <text>Level 3</text>
+    \\        <column gap="2">
+    \\          <text>Level 4</text>
+    \\          <column gap="2">
+    \\            <text>Level 5</text>
+    \\            <column gap="2">
+    \\              <text>Level 6</text>
+    \\              <column gap="2">
+    \\                <text>Level 7</text>
+    \\                <column gap="2">
+    \\                  <text>Level 8</text>
+    \\                  <column gap="2">
+    \\                    <text>Level 9</text>
+    \\                    <column gap="2">
+    \\                      <text>Level 10</text>
+    \\                      <column gap="2">
+    \\                        <text>Level 11</text>
+    \\                        <column gap="2">
+    \\                          <text>Level 12</text>
+    \\                          <column gap="2">
+    \\                            <text>Level 13</text>
+    \\                            <column gap="2">
+    \\                              <text>Level 14</text>
+    \\                              <column gap="2">
+    \\                                <text>Level 15</text>
+    \\                                <column gap="2">
+    \\                                  <text>Level 16</text>
+    \\                                  <column gap="2">
+    \\                                    <text>Level 17</text>
+    \\                                    <column gap="2">
+    \\                                      <text>Level 18</text>
+    \\                                      <column gap="2">
+    \\                                        <text>Level 19</text>
+    \\                                        <column gap="2">
+    \\                                          <text>Level 20</text>
+    \\                                          <column gap="2">
+    \\                                            <text>Level 21</text>
+    \\                                            <column gap="2">
+    \\                                              <text>Level 22</text>
+    \\                                              <column gap="2">
+    \\                                                <text>Level 23</text>
+    \\                                                <text>Deep leaf one</text>
+    \\                                              </column>
+    \\                                            </column>
+    \\                                          </column>
+    \\                                        </column>
+    \\                                      </column>
+    \\                                    </column>
+    \\                                  </column>
+    \\                                </column>
+    \\                              </column>
+    \\                            </column>
+    \\                          </column>
+    \\                        </column>
+    \\                      </column>
+    \\                    </column>
+    \\                  </column>
+    \\                </column>
+    \\              </column>
+    \\            </column>
+    \\          </column>
+    \\        </column>
+    \\      </column>
+    \\    </column>
+    \\  </column>
+    \\</column>
+;
+
+test "a broken deep-fragment save keeps the last good reloaded view and the next good save recovers" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = deep_fragment_baseline });
+    defer cwd.deleteFile(io, deep_fragment_path) catch {};
+
+    // The union this app carries is app-sized: dozens of arms, several
+    // multi-kilobyte — a single message value is over 6 KiB and gets
+    // copied through every builder the reload runs. The interpreter's
+    // per-element frames must not scale with it.
+    try std.testing.expect(@sizeOf(DeepMsg) > 6144);
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(DeepApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = DeepApp.init(std.heap.page_allocator, .{}, deepCounterOptions(io));
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+    try std.testing.expect(app_state.installed);
+
+    // Boot renders the compiled baseline and arms the watch.
+    try std.testing.expect(harness.null_platform.startedTimer(DeepApp.markup_watch_timer_id) != null);
+    try std.testing.expect(harness.runtime.markup_watch_armed);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Baseline") != null);
+
+    // An idle poll (file matches the embedded baseline) keeps the
+    // comptime-compiled path: no override document is adopted.
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 1_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document == null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Baseline") != null);
+
+    // Save the deep fragment: the poll adopts it through the
+    // interpreter — the same bounded rebuild a hot reload performs.
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = deep_fragment_markup });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 2_000_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Baseline") == null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Level 12") != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf one") != null);
+
+    // Model state rides through the reloaded interpreter view.
+    const bump_id = findWidgetIdByText(app_state.tree.?, .button, "Bump").?;
+    var command_buffer: [96]u8 = undefined;
+    const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, bump_id });
+    try harness.runtime.dispatchAutomationCommand(app, click);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+
+    // A save that does not parse: the slot keeps its live document (the
+    // two-arena swap), so the deep reloaded view stays up, and the
+    // teaching diagnostic names the file.
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = "<column><oops</column>" });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 2_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf one") != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Level 12") != null);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_state.markup_diagnostic.?.path, "ui-app-deep-fragment.native") != null);
+
+    // A save that parses but cannot build against the Model (a binding
+    // naming no model field) keeps the same reloaded view: the frame
+    // aborts, the live document survives, the diagnostic reports.
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = "<column><text>{missing_field}</text></column>" });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 3_000_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf one") != null);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+
+    // The next good save recovers in place: still the interpreter, the
+    // deep tree rebuilt again, model state and structural ids held.
+    const deep_markup_v2 = try std.mem.replaceOwned(u8, std.testing.allocator, deep_fragment_markup, "Deep leaf one", "Deep leaf two");
+    defer std.testing.allocator.free(deep_markup_v2);
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = deep_markup_v2 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 3_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf two") != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf one") == null);
+    try std.testing.expect(app_state.markup_diagnostic == null);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+    try std.testing.expectEqual(bump_id, findWidgetIdByText(app_state.tree.?, .button, "Bump").?);
+
+    // One more broken save keeps the RELOADED tree — the retained state
+    // is the live-reload document, not a rebuild from the baseline.
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = "<column><oops</column>" });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 4_000_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf two") != null);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+
+    // And the final good save recovers again, still holding state.
+    const deep_markup_v3 = try std.mem.replaceOwned(u8, std.testing.allocator, deep_fragment_markup, "Deep leaf one", "Deep leaf three");
+    defer std.testing.allocator.free(deep_markup_v3);
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = deep_markup_v3 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 4_500_000).?);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf three") != null);
+    try std.testing.expect(app_state.markup_diagnostic == null);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expectEqual(bump_id, findWidgetIdByText(app_state.tree.?, .button, "Bump").?);
+}
+
 // Two fragments importing ONE shared component file: the import-closure
 // propagation rule is that editing the shared file reloads every fragment
 // whose closure reaches it, in the same poll.
