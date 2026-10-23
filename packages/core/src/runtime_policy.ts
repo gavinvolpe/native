@@ -1859,7 +1859,15 @@ function nscvSemanticTree(request: Uint8Array): Uint8Array {
         while (child < count && depth(child) > depth(i)) {
           if (axis === 0 ? modal(child) || flag(child, 8) && parent(child) === i : modal(child) || flag(child, 8)) { child = skip(child); continue; }
           reach = max(reach, f(f(value(child, axis === 0 ? 56 : 52) + value(child, axis === 0 ? 64 : 60)) + raw));
-          if (axis === 0 ? kind(child) === 14 : kind(child) === 6 || flag(child, 16) || flag(child, 4) || kind(child) === 14 && !flag(child, 128)) child = skip(child); else child++;
+          // A nested clip scope (kind 6 scroll view, flag 16 clip_content,
+          // flag 4 virtualized) bounds its own children on both axes: its
+          // frame is how far it reaches, whatever overflows inside it. The
+          // vertical axis keeps skipping disclosure subtrees wholesale
+          // (kind 14); the horizontal one counts them only while settled
+          // open.
+          if (axis === 0
+            ? kind(child) === 6 || flag(child, 16) || flag(child, 4) || kind(child) === 14
+            : kind(child) === 6 || flag(child, 16) || flag(child, 4) || (kind(child) === 14 && !flag(child, 128))) child = skip(child); else child++;
         }
         content = max(0, f(reach - origin));
       }

@@ -67,6 +67,19 @@ test("scroll reach excludes floating, direct anchored, clipped and concealed des
   word(b,4,16,64|128);r=run(b).records[0]!;assert.equal(r.vertical.content,140);assert.equal(r.horizontal.content,800);
   word(b,4,16,64|128|16);assert.equal(run(b).records[0]!.horizontal.content,130);
 });
+test("scroll reach bounds nested clip scopes on the vertical axis", () => {
+  // The region is 180x60 at the origin: a nested clip scope at frame
+  // (0,40,180,20) whose row bottom reaches y 540, plus a direct child at
+  // y 130 (h 20). The vertical reach follows the nested frame (40 + 20)
+  // and the direct child (150) instead of the nested row's 540, on every
+  // clip-scope flavor (a scroll view, a `clip_content` surface, a
+  // virtualized container); the horizontal reach counts the scope's own
+  // width (180) the same way.
+  const reach=(kind:number,flags:number)=>{const b=tree(4,true);node(b,0,6);word(b,0,16,96);floats(b,0,52,[0,0,0,0,0,0,180,60]);
+    node(b,1,kind,1,0);word(b,1,16,64|flags);floats(b,1,52,[0,40,180,20]);node(b,2,26,2,1);floats(b,2,52,[0,40,180,500]);
+    node(b,3,26,1,0);floats(b,3,52,[0,130,180,20]);return run(b).records[0]!;};
+  for (const [kind,flags] of [[6,0],[26,16],[26,4]]) { const r=reach(kind!,flags!); assert.equal(r.vertical.content,150); assert.equal(r.horizontal.content,180); assert.equal(r.primary.content,150); }
+});
 test("virtual observations use declared content and ignore horizontal grants", () => {
   const b=tree(1,true);node(b,0,6);word(b,0,16,32|4);floats(b,0,84,[150]);floats(b,0,100,[1000]);const r=run(b).records[0]!;
   assert.equal(r.vertical.content,1000);assert.equal(r.horizontal.present,false);assert.equal(r.scrollValue,Math.fround(1/6));

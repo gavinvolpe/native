@@ -529,6 +529,17 @@ fn widgetExposesScrollSemantics(widget: Widget) bool {
     };
 }
 
+/// The vertical content reach reported for a scroll region's semantics and
+/// scrollbar. Four exclusions keep the range honest:
+///   - root-relative modal overlays are out of flow for the region;
+///   - a subtree anchored DIRECTLY to the region stays stationary under
+///     scrolling, so `frame + offset` is not a content-space position;
+///   - a NESTED CLIP SCOPE (scroll view, `clip_content` surface,
+///     virtualized container) bounds its own children — its frame is how
+///     far it reaches, whatever overflows inside it — exactly as the
+///     horizontal mirror (`widgetScrollContentExtentX`) already holds;
+///   - a disclosure subtree is skipped wholesale (concealed content lays
+///     out at full size and must not inflate the extent).
 fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geometry.RectF, virtual_content_extent_fn: anytype) f32 {
     const scroll_node = layout.nodes[scroll_index];
     if (scroll_node.widget.layout.virtualized) {
@@ -556,6 +567,13 @@ fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geo
             continue;
         }
         bottom = @max(bottom, node.frame.maxY() + offset);
+        // A nested clip scope bounds its own children: its frame is how
+        // far it reaches, so its clipped/virtualized content must not
+        // extend this region's scrollable range past what it can reveal.
+        if (widget_tree.widgetClipsContent(node.widget) or node.widget.layout.virtualized) {
+            index = skipSubtree(layout, index);
+            continue;
+        }
         // A disclosure widget's own frame is authoritative for how far
         // its content currently reaches: concealed content lays out at
         // full size BELOW a closed item's header-only frame, and must

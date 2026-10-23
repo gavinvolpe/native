@@ -49,7 +49,11 @@ function nscvScrollTree(request: Uint8Array): Uint8Array {
     let i = target + 1;
     while (i < count && depth(i) > depth(target)) {
       if (stationary(i, target)) { i = skip(i); continue; }
-      bottom = maximum(bottom, f(f(w.getFloat32(at(i) + 24, true) + w.getFloat32(at(i) + 32, true)) + offsetY)); i++;
+      bottom = maximum(bottom, f(f(w.getFloat32(at(i) + 24, true) + w.getFloat32(at(i) + 32, true)) + offsetY));
+      // A nested clip scope (bit 8) or virtual region (bit 16) bounds its
+      // own children vertically as well: its frame is how far it reaches,
+      // whatever overflows inside it.
+      i = (flags(i) & (8 | 16)) !== 0 ? skip(i) : i + 1;
     }
     i = target + 1;
     while (i < count && depth(i) > depth(target)) {

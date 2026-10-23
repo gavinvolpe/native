@@ -1611,6 +1611,14 @@ pub fn revealNewlySelectedTabsWithPolicy(policy: scroll_tree_policy.Policy, prev
     }
 }
 
+/// How far the region's descendants reach downward, rebased to offset 0.
+/// A NESTED CLIP SCOPE (scroll view, `clip_content` surface, virtualized
+/// container) bounds its own children vertically exactly as it does
+/// horizontally (`canvasWidgetLayoutScrollContentExtentX`): its own frame
+/// is how far it reaches, whatever overflows inside it. Counting a nested
+/// scroller's whole content here would inflate this region's range past
+/// anything it can reveal — the outer region would scroll into blank
+/// space for as far as the inner content extends.
 pub fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutNode, scroll_index: usize, viewport: geometry.RectF) f32 {
     if (scroll_index >= nodes.len) return 0;
     const scroll_node = nodes[scroll_index];
@@ -1638,6 +1646,10 @@ pub fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutN
             continue;
         }
         bottom = @max(bottom, nodes[index].frame.maxY() + offset);
+        if (canvasWidgetClipsContent(nodes[index].widget) or nodes[index].widget.layout.virtualized) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
         index += 1;
     }
     return @max(0, bottom - viewport.y);
