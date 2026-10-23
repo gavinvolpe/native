@@ -907,8 +907,16 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 const next: usize = if (index + 1 < children.len) @intFromEnum(children[index + 1].kind) else 9;
                 const action = construction.decide(owner, 2, &.{ @intFromEnum(child.kind), next, @intFromBool(child.attrEntry("test") != null) });
                 switch (action.action) {
-                    1 => try out.append(ui.arena, try self.buildElement(ui, scope, child)),
-                    2 => try out.append(ui.arena, try self.buildUse(ui, scope, child)),
+                    1 => {
+                        const slot = try out.addOne(ui.arena);
+                        errdefer out.items.len -= 1;
+                        try self.buildElementForwardedPressInto(ui, scope, child, &no_forwarded_press, slot);
+                    },
+                    2 => {
+                        const slot = try out.addOne(ui.arena);
+                        errdefer out.items.len -= 1;
+                        try self.buildUseInto(ui, scope, child, slot);
+                    },
                     3 => try self.buildSlot(ui, scope, child, out),
                     4 => {
                         const else_index = index + 1;
