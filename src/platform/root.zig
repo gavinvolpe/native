@@ -162,6 +162,7 @@ pub const TrayCommandEvent = types.TrayCommandEvent;
 pub const TrayActionEvent = types.TrayActionEvent;
 pub const reserved_timer_id_base = types.reserved_timer_id_base;
 pub const press_hold_timer_id = types.press_hold_timer_id;
+pub const caret_blink_timer_id = types.caret_blink_timer_id;
 pub const TimerEvent = types.TimerEvent;
 pub const AudioEvent = types.AudioEvent;
 pub const AudioEventKind = types.AudioEventKind;

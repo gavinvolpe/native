@@ -468,6 +468,14 @@ pub const Runtime = struct {
     canvas_frame_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined,
     canvas_frame_render_override_samples: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     canvas_frame_render_override_combined: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
+    /// Whether the framework's one-shot caret-blink wake timer
+    /// (`platform.caret_blink_timer_id`) is currently armed. The frame
+    /// pump arms it while a view's only time-work is the caret blink
+    /// (the display-grid pump parks between blink sweep boundaries);
+    /// the fired timer wakes due views with exactly one frame and
+    /// re-arms. Blur removes the blink and nothing re-arms, so the
+    /// view goes idle.
+    canvas_caret_blink_wake_armed: bool = false,
     /// Runtime-registered canvas images (see canvas_images.zig): entry
     /// metadata, the per-slot pixel buffers, and the `ReferenceImage`
     /// scratch the frame planner hands to renderers each plan. Each
@@ -1005,6 +1013,7 @@ pub const Runtime = struct {
     pub const setCanvasFrameBudget = CanvasFrameMethods.setCanvasFrameBudget;
     pub const setGpuSurfaceInputLatencyBudget = CanvasFrameMethods.setGpuSurfaceInputLatencyBudget;
     const requestCanvasFrameForView = CanvasFrameMethods.requestCanvasFrameForView;
+    pub const handleCaretBlinkTimerWake = CanvasFrameMethods.handleCaretBlinkTimerWake;
     const invalidateForCanvasChanges = CanvasFrameMethods.invalidateForCanvasChanges;
 
     const CanvasImageMethods = runtime_canvas_images.RuntimeCanvasImages(Runtime);

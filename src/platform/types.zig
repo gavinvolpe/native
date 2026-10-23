@@ -1666,6 +1666,19 @@ pub const reserved_timer_id_base: u64 = 0xffff_ffff_0000_0000;
 /// knowing the app type.
 pub const press_hold_timer_id: u64 = reserved_timer_id_base | 0x2e70_601d;
 
+/// Reserved framework timer id for the focused caret's blink wake. A
+/// view whose ONLY time-work is the caret blink parks the display-grid
+/// frame pump between blink sweep boundaries (a boundary frame lands on
+/// an opacity extreme, so the blink still reads as the conventional
+/// on/off toggle); the runtime arms this ONE-SHOT timer for the next
+/// boundary and the fired event is consumed inside
+/// `Runtime.dispatchPlatformEvent` — never journaled, never app-visible —
+/// invalidating the caret's dirty bounds and requesting exactly one
+/// frame. Blur removes the blink animation and nothing re-arms the
+/// timer, so the view goes idle. `focus loss -> idle` is this seam's
+/// contract.
+pub const caret_blink_timer_id: u64 = reserved_timer_id_base | 0x6361_7265;
+
 pub const TimerEvent = struct {
     id: u64,
     timestamp_ns: u64 = 0,
