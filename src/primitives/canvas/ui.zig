@@ -3377,12 +3377,12 @@ pub fn Ui(comptime Msg: type) type {
         /// re-resolve when the theme changes.
         pub fn finalizeWithTokens(self: *Self, node: Node, tokens: canvas.DesignTokens) error{OutOfMemory}!Tree {
             if (self.failed) return error.OutOfMemory;
-            const handler_capacity = countHandlers(node);
+            const handler_capacity = countHandlers(&node);
             const handlers = try self.arena.alloc(Handler, handler_capacity);
             var handler_len: usize = 0;
             const root_key = node.key orelse UiKey{ .index = 0 };
             var key_trail = ui_provenance.KeyTrail{};
-            const root = try self.finalizeNode(node, root_id_seed, root_key, handlers, &handler_len, &tokens, &key_trail);
+            const root = try self.finalizeNode(&node, root_id_seed, root_key, handlers, &handler_len, &tokens, &key_trail);
             return .{
                 .root = root,
                 .handlers = handlers[0..handler_len],
@@ -3390,9 +3390,16 @@ pub fn Ui(comptime Msg: type) type {
             };
         }
 
+        /// The recursion is once per element, and `Node` carries the app's
+        /// whole message union by value in its handler fields, so the
+        /// parameter is a POINTER: a by-value copy here would scale every
+        /// frame with the union — an app-sized union at realistic nesting
+        /// exhausts the main-thread stack during a hot-reload rebuild
+        /// (the same bound the markup interpreter's per-element builders
+        /// hold).
         fn finalizeNode(
             self: *Self,
-            node: Node,
+            node: *const Node,
             parent_id: ObjectId,
             key: UiKey,
             handlers: []Handler,
@@ -3457,26 +3464,26 @@ pub fn Ui(comptime Msg: type) type {
             }
             // Typed handlers imply the matching accessibility actions, the
             // same way a stringly `command` does for engine-owned dispatch.
-            if (node.on_press != null) widget.semantics.actions.press = true;
-            if (node.on_drag != null) widget.semantics.actions.drag = true;
+            if (hasHandler(&node.on_press)) widget.semantics.actions.press = true;
+            if (hasHandler(&node.on_drag)) widget.semantics.actions.drag = true;
             // A double-press handler makes the element pressable too:
             // the double-click's first release must land somewhere, and
             // an element that acts on double click without claiming
             // presses would be unreachable by pointer at all.
-            if (node.on_double_press != null) widget.semantics.actions.press = true;
-            if (node.on_toggle != null) widget.semantics.actions.toggle = true;
+            if (hasHandler(&node.on_double_press)) widget.semantics.actions.press = true;
+            if (hasHandler(&node.on_toggle)) widget.semantics.actions.toggle = true;
             // A hold handler makes the element pressable (hit target +
             // press claimer), like on_press: the hold gesture starts as a
             // press, and the classic list-row shape (press to open, hold
             // for the menu) pairs the two on one element.
-            if (node.on_hold != null) widget.semantics.actions.press = true;
+            if (hasHandler(&node.on_hold)) widget.semantics.actions.press = true;
             // Hover family: binding either edge makes the element
             // hover-hittable (`Widget.hover_msgs` — the chart
             // hover-details shape, a hit target that claims no
             // presses), never pressable: hover is not an action a
             // screen reader can invoke, so no semantic action is
             // stamped.
-            if (node.on_hover_enter != null or node.on_hover_leave != null) widget.hover_msgs = true;
+            if (hasHandler(&node.on_hover_enter) or hasHandler(&node.on_hover_leave)) widget.hover_msgs = true;
             if (node.on_input != null) widget.semantics.actions.set_text = true;
             if (widget.kind == .slider and (node.on_value != null or node.on_change != null)) {
                 widget.semantics.actions.increment = true;
@@ -3492,32 +3499,32 @@ pub fn Ui(comptime Msg: type) type {
                 // (and a pane narrower than its content) never paints
                 // into the neighbor.
                 const child_widgets = try self.arena.alloc(Widget, 3);
-                child_widgets[0] = try self.finalizeNode(node.nodes[0], widget.id, node.nodes[0].key orelse UiKey{ .index = 0 }, handlers, handler_len, tokens, key_trail);
+                child_widgets[0] = try self.finalizeNode(&node.nodes[0], widget.id, node.nodes[0].key orelse UiKey{ .index = 0 }, handlers, handler_len, tokens, key_trail);
                 child_widgets[1] = splitDividerWidget(widget);
-                child_widgets[2] = try self.finalizeNode(node.nodes[1], widget.id, node.nodes[1].key orelse UiKey{ .index = 1 }, handlers, handler_len, tokens, key_trail);
+                child_widgets[2] = try self.finalizeNode(&node.nodes[1], widget.id, node.nodes[1].key orelse UiKey{ .index = 1 }, handlers, handler_len, tokens, key_trail);
                 child_widgets[0].layout.clip_content = true;
                 child_widgets[2].layout.clip_content = true;
                 widget.children = child_widgets;
             } else if (node.nodes.len > 0) {
                 const child_widgets = try self.arena.alloc(Widget, node.nodes.len);
-                for (node.nodes, 0..) |child, index| {
+                for (node.nodes, 0..) |*child, index| {
                     const child_key = child.key orelse UiKey{ .index = index };
                     child_widgets[index] = try self.finalizeNode(child, widget.id, child_key, handlers, handler_len, tokens, key_trail);
                 }
                 widget.children = child_widgets;
             }
-            appendHandler(handlers, handler_len, widget.id, .press, node.on_press);
-            appendHandler(handlers, handler_len, widget.id, .drag, node.on_drag);
-            appendHandler(handlers, handler_len, widget.id, .double_press, node.on_double_press);
-            appendHandler(handlers, handler_len, widget.id, .toggle, node.on_toggle);
-            appendHandler(handlers, handler_len, widget.id, .change, node.on_change);
-            appendHandler(handlers, handler_len, widget.id, .submit, node.on_submit);
-            appendHandler(handlers, handler_len, widget.id, .dismiss, node.on_dismiss);
-            appendHandler(handlers, handler_len, widget.id, .hold, node.on_hold);
-            appendHandler(handlers, handler_len, widget.id, .hover_enter, node.on_hover_enter);
-            appendHandler(handlers, handler_len, widget.id, .hover_leave, node.on_hover_leave);
-            appendHandler(handlers, handler_len, widget.id, .reach_end, node.on_reach_end);
-            appendHandler(handlers, handler_len, widget.id, .reach_start, node.on_reach_start);
+            appendHandler(handlers, handler_len, widget.id, .press, &node.on_press);
+            appendHandler(handlers, handler_len, widget.id, .drag, &node.on_drag);
+            appendHandler(handlers, handler_len, widget.id, .double_press, &node.on_double_press);
+            appendHandler(handlers, handler_len, widget.id, .toggle, &node.on_toggle);
+            appendHandler(handlers, handler_len, widget.id, .change, &node.on_change);
+            appendHandler(handlers, handler_len, widget.id, .submit, &node.on_submit);
+            appendHandler(handlers, handler_len, widget.id, .dismiss, &node.on_dismiss);
+            appendHandler(handlers, handler_len, widget.id, .hold, &node.on_hold);
+            appendHandler(handlers, handler_len, widget.id, .hover_enter, &node.on_hover_enter);
+            appendHandler(handlers, handler_len, widget.id, .hover_leave, &node.on_hover_leave);
+            appendHandler(handlers, handler_len, widget.id, .reach_end, &node.on_reach_end);
+            appendHandler(handlers, handler_len, widget.id, .reach_start, &node.on_reach_start);
             if (node.on_input) |make| {
                 handlers[handler_len.*] = .{ .id = widget.id, .event = .input, .action = .{ .input = make } };
                 handler_len.* += 1;
@@ -3650,33 +3657,47 @@ pub fn Ui(comptime Msg: type) type {
             };
         }
 
-        fn appendHandler(handlers: []Handler, handler_len: *usize, id: ObjectId, event: UiHandlerEvent, msg: ?Msg) void {
-            const value = msg orelse return;
+        /// The message rides by POINTER: a by-value optional parameter
+        /// materializes the whole union in the caller's frame at every
+        /// call site, and the callers are the per-element `finalizeNode`
+        /// recursion — its frame must not scale with `Msg`. The one
+        /// payload copy happens here, in a bounded leaf.
+        fn appendHandler(handlers: []Handler, handler_len: *usize, id: ObjectId, event: UiHandlerEvent, msg: *const ?Msg) void {
+            const value = msg.* orelse return;
             handlers[handler_len.*] = .{ .id = id, .event = event, .action = .{ .message = value } };
             handler_len.* += 1;
         }
 
-        fn countHandlers(node: Node) usize {
+        /// A bound handler's null test goes through a pointer for the same
+        /// reason: reading the optional's flag must not copy the payload
+        /// into the recursive caller's frame.
+        fn hasHandler(msg: *const ?Msg) bool {
+            return msg.* != null;
+        }
+
+        /// Same frame rule as `finalizeNode`: recurse over pointers, not
+        /// by-value `Node` copies.
+        fn countHandlers(node: *const Node) usize {
             var total: usize = 0;
-            if (node.on_press != null) total += 1;
-            if (node.on_drag != null) total += 1;
-            if (node.on_double_press != null) total += 1;
-            if (node.on_toggle != null) total += 1;
-            if (node.on_change != null) total += 1;
-            if (node.on_submit != null) total += 1;
-            if (node.on_dismiss != null) total += 1;
-            if (node.on_hold != null) total += 1;
-            if (node.on_hover_enter != null) total += 1;
-            if (node.on_hover_leave != null) total += 1;
-            if (node.on_reach_end != null) total += 1;
-            if (node.on_reach_start != null) total += 1;
+            if (hasHandler(&node.on_press)) total += 1;
+            if (hasHandler(&node.on_drag)) total += 1;
+            if (hasHandler(&node.on_double_press)) total += 1;
+            if (hasHandler(&node.on_toggle)) total += 1;
+            if (hasHandler(&node.on_change)) total += 1;
+            if (hasHandler(&node.on_submit)) total += 1;
+            if (hasHandler(&node.on_dismiss)) total += 1;
+            if (hasHandler(&node.on_hold)) total += 1;
+            if (hasHandler(&node.on_hover_enter)) total += 1;
+            if (hasHandler(&node.on_hover_leave)) total += 1;
+            if (hasHandler(&node.on_reach_end)) total += 1;
+            if (hasHandler(&node.on_reach_start)) total += 1;
             if (node.on_input != null) total += 1;
             if (node.on_value != null) total += 1;
             if (node.on_resize != null) total += 1;
             if (node.on_scroll != null) total += 1;
             if (node.on_terminal != null) total += 1;
             if (node.context_menu.len > 0) total += 1;
-            for (node.nodes) |child| total += countHandlers(child);
+            for (node.nodes) |*child| total += countHandlers(child);
             return total;
         }
 

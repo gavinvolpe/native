@@ -194,17 +194,34 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// onto the built `Ui.Node`. Every element — composites included —
         /// funnels through here, so the stamp covers the whole vocabulary
         /// in one place. `finalize` pairs the stamp with the structural id.
+        const no_forwarded_press: ?MsgT = null;
+
         fn buildElement(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
             return self.buildElementForwardedPress(ui, scope, node, null);
         }
 
         fn buildElementForwardedPress(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: ?MsgT) BuildError!Ui.Node {
-            var built = try self.buildElementInner(ui, scope, node, forwarded_press);
-            if (forwarded_press) |msg| {
+            var built: Ui.Node = undefined;
+            try self.buildElementForwardedPressInto(ui, scope, node, &forwarded_press, &built);
+            return built;
+        }
+
+        // The element build recurses once per element, so every function
+        // on that path writes its result through `out` and keeps no
+        // `Ui.Node`, `Ui.ElementOptions` or message temporaries of its own:
+        // in Debug each by-value result or error-union call site is a
+        // separate stack slot, and a frame holding dozens of them grew with
+        // the app's message size on every level of nesting. Each element
+        // kind's construction lives in its own helper, active only while
+        // that kind builds.
+        fn buildElementForwardedPressInto(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: *const ?MsgT, out: *Ui.Node) BuildError!void {
+            try self.buildElementInto(ui, scope, node, forwarded_press, out);
+            const built = out;
+            if (forwarded_press.*) |*msg| {
                 // A press declared on <use> belongs to the expanded root.
                 // Set it after the root-specific builder has run so generic
                 // template roots become interactive as well.
-                built.on_press = msg;
+                built.on_press = msg.*;
                 built.widget.semantics.focusable = true;
             }
             if (ui.provenance_sink != null) {
@@ -218,65 +235,67 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 };
                 built.source = source;
             }
-            return built;
         }
 
-        fn buildElementInner(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: ?MsgT) BuildError!Ui.Node {
-            if (std.mem.eql(u8, node.name, "markdown")) {
-                return self.buildMarkdown(ui, scope, node);
-            }
-            if (std.mem.eql(u8, node.name, "code")) {
-                return self.buildCode(ui, scope, node);
-            }
-            if (std.mem.eql(u8, node.name, "stepper")) {
-                return self.buildStepper(ui, scope, node);
-            }
+        const Composite = enum { markdown, code, stepper, timeline, timeline_item, chart, video, input_group };
+
+        fn buildCompositeInto(self: *Self, comptime which: Composite, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: *const ?MsgT, out: *Ui.Node) BuildError!void {
+            out.* = switch (which) {
+                .markdown => try self.buildMarkdown(ui, scope, node),
+                .code => try self.buildCode(ui, scope, node),
+                .stepper => try self.buildStepper(ui, scope, node),
+                .timeline => try self.buildTimeline(ui, scope, node),
+                .timeline_item => try self.buildTimelineItem(ui, scope, node, forwarded_press.*),
+                .chart => try self.buildChart(ui, scope, node),
+                .video => try self.buildVideo(ui, scope, node),
+                .input_group => try self.buildInputGroup(ui, scope, node),
+            };
+        }
+
+        fn buildElementInto(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: *const ?MsgT, out: *Ui.Node) BuildError!void {
+            if (std.mem.eql(u8, node.name, "markdown")) return self.buildCompositeInto(.markdown, ui, scope, node, forwarded_press, out);
+            if (std.mem.eql(u8, node.name, "code")) return self.buildCompositeInto(.code, ui, scope, node, forwarded_press, out);
+            if (std.mem.eql(u8, node.name, "stepper")) return self.buildCompositeInto(.stepper, ui, scope, node, forwarded_press, out);
             if (std.mem.eql(u8, node.name, "step")) {
                 // Steps inside a stepper are consumed by buildStepper.
-                return self.failNode(node, markup.step_parent_message);
+                return self.failVoid(node, markup.step_parent_message);
             }
-            if (std.mem.eql(u8, node.name, "timeline")) {
-                return self.buildTimeline(ui, scope, node);
-            }
-            if (std.mem.eql(u8, node.name, "timeline-item")) {
-                return self.buildTimelineItem(ui, scope, node, forwarded_press);
-            }
-            if (std.mem.eql(u8, node.name, "chart")) {
-                return self.buildChart(ui, scope, node);
-            }
+            if (std.mem.eql(u8, node.name, "timeline")) return self.buildCompositeInto(.timeline, ui, scope, node, forwarded_press, out);
+            if (std.mem.eql(u8, node.name, "timeline-item")) return self.buildCompositeInto(.timeline_item, ui, scope, node, forwarded_press, out);
+            if (std.mem.eql(u8, node.name, "chart")) return self.buildCompositeInto(.chart, ui, scope, node, forwarded_press, out);
             if (std.mem.eql(u8, node.name, "series")) {
                 // Series inside a chart are consumed by buildChart.
-                return self.failNode(node, markup.series_parent_message);
+                return self.failVoid(node, markup.series_parent_message);
             }
-            if (std.mem.eql(u8, node.name, "video")) {
-                return self.buildVideo(ui, scope, node);
-            }
+            if (std.mem.eql(u8, node.name, "video")) return self.buildCompositeInto(.video, ui, scope, node, forwarded_press, out);
             if (std.mem.eql(u8, node.name, "context-menu")) {
                 // Direct context-menu children are consumed by their host
                 // element below; one reaching here is misplaced.
-                return self.failNode(node, markup.context_menu_parent_message);
+                return self.failVoid(node, markup.context_menu_parent_message);
             }
-            if (std.mem.eql(u8, node.name, "input-group")) {
-                return self.buildInputGroup(ui, scope, node);
-            }
+            if (std.mem.eql(u8, node.name, "input-group")) return self.buildCompositeInto(.input_group, ui, scope, node, forwarded_press, out);
             if (std.mem.eql(u8, node.name, "input-group-actions")) {
                 // Actions rows inside an input-group are consumed by
                 // buildInputGroup.
-                return self.failNode(node, markup.input_group_actions_parent_message);
+                return self.failVoid(node, markup.input_group_actions_parent_message);
             }
             if (std.mem.eql(u8, node.name, "span")) {
                 // Spans inside a text paragraph are consumed by
                 // buildSpanParagraph; one reaching here has no text
                 // parent.
-                return self.failNode(node, markup.span_parent_message);
+                return self.failVoid(node, markup.span_parent_message);
             }
             if (std.mem.eql(u8, node.name, "reactions")) {
                 // Reactions inside a bubble are consumed by the bubble's
                 // build below; one reaching here has no bubble parent.
-                return self.failNode(node, markup.reactions_parent_message);
+                return self.failVoid(node, markup.reactions_parent_message);
             }
+            return self.buildGenericElementInto(ui, scope, node, out);
+        }
+
+        fn buildGenericElementInto(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, out: *Ui.Node) BuildError!void {
             const kind = elementKind(node.name) orelse {
-                return self.failNode(node, "unknown element");
+                return self.failVoid(node, "unknown element");
             };
             // Extract a direct context-menu child: it is metadata on this
             // element (lowered to the declared platform-menu items), not
@@ -287,8 +306,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             var context_menu_child: ?markup.MarkupNode = null;
             for (node.children) |child| {
                 if (!markup.nodeIsContextMenu(child)) continue;
-                if (context_menu_child != null) return self.failNode(child, markup.context_menu_single_message);
-                if (!markup.contextMenuHostEligible(node)) return self.failNode(child, markup.context_menu_host_message);
+                if (context_menu_child != null) return self.failVoid(child, markup.context_menu_single_message);
+                if (!markup.contextMenuHostEligible(node)) return self.failVoid(child, markup.context_menu_host_message);
                 if (markup.contextMenuShapeError(child)) |info| {
                     self.diagnostic = .{ .line = info.line, .column = info.column, .message = info.message, .path = info.path };
                     return error.MarkupBuild;
@@ -303,8 +322,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             var reactions_child: ?markup.MarkupNode = null;
             for (node.children) |child| {
                 if (!markup.nodeIsReactions(child)) continue;
-                if (kind != .bubble) return self.failNode(child, markup.reactions_parent_message);
-                if (reactions_child != null) return self.failNode(child, markup.reactions_single_message);
+                if (kind != .bubble) return self.failVoid(child, markup.reactions_parent_message);
+                if (reactions_child != null) return self.failVoid(child, markup.reactions_single_message);
                 if (markup.reactionsShapeError(child)) |info| {
                     self.diagnostic = .{ .line = info.line, .column = info.column, .message = info.message, .path = info.path };
                     return error.MarkupBuild;
@@ -317,7 +336,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // compiled engine.
             if (kind == .bubble) {
                 if (node.attrEntry("text")) |_| {
-                    return self.failNode(node, markup.bubble_text_attr_message);
+                    return self.failVoid(node, markup.bubble_text_attr_message);
                 }
             }
             if (context_menu_child != null or reactions_child != null) {
@@ -341,13 +360,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (!canvas.widgetKindHitTarget(kind)) {
                 for (node.attrs) |attribute| {
                     if (std.mem.startsWith(u8, attribute.name, "on-") and markup.deadHandlerOnNonHitTarget(attribute.name)) {
-                        return self.failNode(node, markup.non_hit_target_handler_message);
+                        return self.failVoid(node, markup.non_hit_target_handler_message);
                     }
                     // Autofocus can never land here: nothing about this
                     // element is focusable. Mirrors the validator and
                     // the compiled engine's compile error.
                     if (std.mem.eql(u8, attribute.name, "autofocus")) {
-                        return self.failNode(node, markup.autofocus_element_message);
+                        return self.failVoid(node, markup.autofocus_element_message);
                     }
                 }
             }
@@ -359,7 +378,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (canvas.widgetKindStacksChildren(kind)) {
                 for (node.attrs) |attribute| {
                     if (std.mem.eql(u8, attribute.name, "gap")) {
-                        return self.failNode(node, markup.stack_container_gap_message);
+                        return self.failVoid(node, markup.stack_container_gap_message);
                     }
                 }
             }
@@ -369,10 +388,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (kind != .text) {
                 for (node.attrs) |attribute| {
                     if (std.mem.eql(u8, attribute.name, "wrap")) {
-                        return self.failNode(node, markup.wrap_element_message);
+                        return self.failVoid(node, markup.wrap_element_message);
                     }
                     if (std.mem.eql(u8, attribute.name, "overflow")) {
-                        return self.failNode(node, markup.overflow_element_message);
+                        return self.failVoid(node, markup.overflow_element_message);
                     }
                 }
             }
@@ -381,7 +400,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (kind != .textarea) {
                 for (node.attrs) |attribute| {
                     if (std.mem.eql(u8, attribute.name, "submit-on-enter")) {
-                        return self.failNode(node, markup.submit_on_enter_element_message);
+                        return self.failVoid(node, markup.submit_on_enter_element_message);
                     }
                 }
             }
@@ -393,7 +412,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 const expression = markup.parseAttrExpression(attribute.value) orelse continue;
                 if (expression != .literal) continue;
                 if (!markup.nameInList(expression.literal, &markup.overflow_value_names)) {
-                    return self.failNode(node, markup.overflow_value_message);
+                    return self.failVoid(node, markup.overflow_value_message);
                 }
             }
             // The size register's closed literal vocabulary: the control
@@ -406,10 +425,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 if (expression != .literal) continue;
                 if (markup.nameInList(expression.literal, &markup.known_text_size_value_names)) {
                     if (kind != .text) {
-                        return self.failNode(node, markup.text_size_element_message);
+                        return self.failVoid(node, markup.text_size_element_message);
                     }
                 } else if (!markup.nameInList(expression.literal, &markup.known_control_size_value_names)) {
-                    return self.failNode(node, markup.size_value_message);
+                    return self.failVoid(node, markup.size_value_message);
                 }
             }
             // Splits take exactly two static pane children (the divider
@@ -420,10 +439,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 for (inner.children) |child| {
                     switch (child.kind) {
                         .element, .use_block => pane_count += 1,
-                        else => return self.failNode(child, markup.split_children_message),
+                        else => return self.failVoid(child, markup.split_children_message),
                     }
                 }
-                if (pane_count != 2) return self.failNode(node, markup.split_children_message);
+                if (pane_count != 2) return self.failVoid(node, markup.split_children_message);
             }
             // The image leaf's static shape, mirroring the validator and
             // the compiled engine's compile error. Without its id binding
@@ -436,10 +455,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // check.
             if (kind == .image) {
                 if (node.attr("image") == null) {
-                    return self.failNode(node, markup.image_missing_image_message);
+                    return self.failVoid(node, markup.image_missing_image_message);
                 }
                 if (node.children.len > 0) {
-                    return self.failNode(node, markup.image_children_message);
+                    return self.failVoid(node, markup.image_children_message);
                 }
             }
             // The terminal leaf's static shape, the image policy exactly:
@@ -450,10 +469,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // child.
             if (kind == .terminal) {
                 if (node.attr("pty") == null) {
-                    return self.failNode(node, markup.terminal_missing_pty_message);
+                    return self.failVoid(node, markup.terminal_missing_pty_message);
                 }
                 if (node.children.len > 0) {
-                    return self.failNode(node, markup.terminal_children_message);
+                    return self.failVoid(node, markup.terminal_children_message);
                 }
             }
             // The a11y lint's error half: an unnamed interactive control
@@ -462,13 +481,14 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // mistake. Mirrors the validator and the compiled engine's
             // compile error.
             if (markup.a11yNameError(node)) |message| {
-                return self.failNode(node, message);
+                return self.failVoid(node, message);
             }
             if (markup.a11yRoleError(node)) |message| {
-                return self.failNode(node, message);
+                return self.failVoid(node, message);
             }
-            var options: Ui.ElementOptions = .{};
-            try self.applyAttrs(scope, node, &options);
+            const options = try ui.arena.create(Ui.ElementOptions);
+            options.* = .{};
+            try self.applyAttrs(scope, node, options);
             // The extracted context-menu lowers through the ordinary
             // element path — its menu-items build like any element
             // (structure tags, interpolation, and message typing all
@@ -481,34 +501,14 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 options.context_menu = ui.contextMenuItemsFromNodes(menu_children.items);
             }
 
-            if (kind == .icon) {
-                // The shared icon value grammar, no children. Mirrors the
-                // validator and the compiled engine: a built-in literal is
-                // proven here (a typo can never rot), while app: names and
-                // bound names ride the explicit icon channel and degrade
-                // at draw time to the missing-icon fallback plus a Debug
-                // warning naming the value.
-                const name_attr = node.attrEntry("name") orelse return self.failNode(node, markup.icon_missing_name_message);
-                if (inner.children.len > 0) return self.failNode(node, markup.icon_children_message);
-                switch (markup.iconValueOf(name_attr.value, markup.icon_name_message)) {
-                    .builtin => |name| {
-                        var built = ui.el(kind, options, .{});
-                        built.widget.text = name;
-                        return built;
-                    },
-                    .app => |spelled| options.icon = spelled,
-                    .binding => options.icon = try self.stringAttr(scope, node, name_attr, markup.icon_name_message),
-                    .invalid => |message| return self.failNode(node, message),
-                }
-                return ui.el(kind, options, .{});
-            }
+            if (kind == .icon) return self.buildIconInto(ui, scope, node, inner, kind, options, out);
 
             // The span paragraph: a text element with inline <span>
             // children lowers through Ui.paragraph, exactly like a
             // builder span paragraph. Mirrors the validator and the
             // compiled engine.
             if (kind == .text and markup.nodeHasSpanChildren(inner)) {
-                return self.buildSpanParagraph(ui, scope, inner, options);
+                return self.buildSpanParagraphInto(ui, scope, inner, options, out);
             }
 
             // The list-row composite: a text-taking element whose content
@@ -520,28 +520,61 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             const composite_children = elementTakesChildren(kind) and markup.nodeHasElementContent(inner);
             if (composite_children) {
                 for (inner.children) |child| {
-                    if (child.kind == .text) return self.failNode(child, markup.text_or_children_content_message);
+                    if (child.kind == .text) return self.failVoid(child, markup.text_or_children_content_message);
                 }
             }
             if (elementTakesText(kind) and !composite_children) {
-                var built = ui.el(kind, options, .{});
-                // Element content wins when present; an empty element
-                // keeps the already-resolved text= attribute in options.
-                // Checkbox/radio joined this path when they became text
-                // leaves, so replacing unconditionally would regress the
-                // binding-friendly attribute that already worked.
-                if (inner.children.len > 0) {
-                    built.widget.text = try self.interpolatedText(ui, scope, inner);
-                }
-                // Avatars clip their runtime image to the avatar circle,
-                // exactly like `Ui.avatar` (a no-op while the id is 0 and
-                // the initials fallback renders).
-                if (kind == .avatar) built.widget.image_fit = .cover;
-                return built;
+                return self.buildTextLeafInto(ui, scope, inner, kind, options, out);
             }
 
             var children: std.ArrayListUnmanaged(Ui.Node) = .empty;
             try self.buildChildren(ui, scope, inner, &children);
+            try self.finishContainerInto(ui, scope, kind, options, children.items, reactions_child, out);
+        }
+
+        fn buildIconInto(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, inner: markup.MarkupNode, kind: canvas.WidgetKind, options: *Ui.ElementOptions, out: *Ui.Node) BuildError!void {
+            // The shared icon value grammar, no children. Mirrors the
+            // validator and the compiled engine: a built-in literal is
+            // proven here (a typo can never rot), while app: names and
+            // bound names ride the explicit icon channel and degrade
+            // at draw time to the missing-icon fallback plus a Debug
+            // warning naming the value.
+            const name_attr = node.attrEntry("name") orelse return self.failVoid(node, markup.icon_missing_name_message);
+            if (inner.children.len > 0) return self.failVoid(node, markup.icon_children_message);
+            switch (markup.iconValueOf(name_attr.value, markup.icon_name_message)) {
+                .builtin => |name| {
+                    out.* = ui.el(kind, options.*, .{});
+                    out.widget.text = name;
+                    return;
+                },
+                .app => |spelled| options.icon = spelled,
+                .binding => options.icon = try self.stringAttr(scope, node, name_attr, markup.icon_name_message),
+                .invalid => |message| return self.failVoid(node, message),
+            }
+            out.* = ui.el(kind, options.*, .{});
+        }
+
+        fn buildSpanParagraphInto(self: *Self, ui: *Ui, scope: *Scope, inner: markup.MarkupNode, options: *const Ui.ElementOptions, out: *Ui.Node) BuildError!void {
+            out.* = try self.buildSpanParagraph(ui, scope, inner, options.*);
+        }
+
+        fn buildTextLeafInto(self: *Self, ui: *Ui, scope: *Scope, inner: markup.MarkupNode, kind: canvas.WidgetKind, options: *const Ui.ElementOptions, out: *Ui.Node) BuildError!void {
+            out.* = ui.el(kind, options.*, .{});
+            // Element content wins when present; an empty element
+            // keeps the already-resolved text= attribute in options.
+            // Checkbox/radio joined this path when they became text
+            // leaves, so replacing unconditionally would regress the
+            // binding-friendly attribute that already worked.
+            if (inner.children.len > 0) {
+                out.widget.text = try self.interpolatedText(ui, scope, inner);
+            }
+            // Avatars clip their runtime image to the avatar circle,
+            // exactly like `Ui.avatar` (a no-op while the id is 0 and
+            // the initials fallback renders).
+            if (kind == .avatar) out.widget.image_fit = .cover;
+        }
+
+        fn finishContainerInto(self: *Self, ui: *Ui, scope: *Scope, kind: canvas.WidgetKind, options: *const Ui.ElementOptions, children: []Ui.Node, reactions_child: ?markup.MarkupNode, out: *Ui.Node) BuildError!void {
             // Tab triggers ARE segmented controls: markup composes the
             // strip from `<button>` children (segmented-control is a
             // documented markup exclusion), and the engine lowers them to
@@ -549,8 +582,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // trigger lifts to the surface with a hairline exactly like
             // the Zig builder's tabs. Handlers ride the widget id, so
             // `selected=`/`on-press` bindings are untouched.
-            if (kind == .tabs) lowerTabsTriggers(children.items);
-            var built = ui.el(kind, options, @as([]const Ui.Node, children.items));
+            if (kind == .tabs) lowerTabsTriggers(children);
+            out.* = ui.el(kind, options.*, @as([]const Ui.Node, children));
             // The extracted reactions run lands on the bubble widget's
             // chrome-text channel — the render pass draws it as the
             // docked pill — and the dock rides text_alignment (end is
@@ -558,14 +591,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // hang from). Interpolation applies to the run like any
             // text content.
             if (reactions_child) |pill_node| {
-                built.widget.text = try self.interpolatedText(ui, scope, pill_node);
-                built.widget.text_alignment = if (pill_node.attr("text-alignment")) |raw|
+                out.widget.text = try self.interpolatedText(ui, scope, pill_node);
+                out.widget.text_alignment = if (pill_node.attr("text-alignment")) |raw|
                     std.meta.stringToEnum(canvas.TextAlign, raw) orelse
-                        return self.failNode(pill_node, markup.reactions_alignment_value_message)
+                        return self.failVoid(pill_node, markup.reactions_alignment_value_message)
                 else
                     .end;
             }
-            return built;
         }
 
         fn buildChildren(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, out: *std.ArrayListUnmanaged(Ui.Node)) BuildError!void {
@@ -577,8 +609,19 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             while (index < children.len) : (index += 1) {
                 const child = children[index];
                 switch (child.kind) {
-                    .element => try out.append(ui.arena, try self.buildElement(ui, scope, child)),
-                    .use_block => try out.append(ui.arena, try self.buildUse(ui, scope, child)),
+                    // Built in place: no node passes through this frame.
+                    // A failed build abandons the whole tree, so the
+                    // unfilled slot is only dropped for tidiness.
+                    .element => {
+                        const slot = try out.addOne(ui.arena);
+                        errdefer out.items.len -= 1;
+                        try self.buildElementForwardedPressInto(ui, scope, child, &no_forwarded_press, slot);
+                    },
+                    .use_block => {
+                        const slot = try out.addOne(ui.arena);
+                        errdefer out.items.len -= 1;
+                        try self.buildUseInto(ui, scope, child, slot);
+                    },
                     .template_block => return self.failVoid(child, markup.template_top_level_message),
                     .import_block => return self.failVoid(child, markup.import_top_level_message),
                     .slot_block => try self.buildSlot(ui, scope, child, out),
@@ -1580,12 +1623,21 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// chain at the expansion site, exactly as if the body were
         /// written inline.
         fn buildUse(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            var built: Ui.Node = undefined;
+            try self.buildUseInto(ui, scope, node, &built);
+            return built;
+        }
+
+        /// `<use>` expansion is on the recursive build path (a template
+        /// body nests further uses), so like the element builders it
+        /// writes through `out` and keeps no node or options temporaries.
+        fn buildUseInto(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, out: *Ui.Node) BuildError!void {
             @setEvalBranchQuota(scan_quota);
             const template_name = node.attr("template") orelse {
-                return self.failNode(node, markup.use_template_attr_message);
+                return self.failVoid(node, markup.use_template_attr_message);
             };
             const template_index = self.document.templateIndex(template_name) orelse {
-                return self.failNode(node, markup.use_undefined_template_message);
+                return self.failVoid(node, markup.use_undefined_template_message);
             };
             const template_node = self.document.templates[template_index];
             // The validator's define-before-use rule, enforced again at
@@ -1593,38 +1645,41 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // unvalidated document must not slip past it.
             if (scope.template_ctx) |ctx_index| {
                 if (template_index >= ctx_index) {
-                    return self.failNode(node, markup.use_earlier_template_message);
+                    return self.failVoid(node, markup.use_earlier_template_message);
                 }
             }
             if (scope.use_depth >= max_use_depth) {
-                return self.failNode(node, "template expansion nests too deeply");
+                return self.failVoid(node, "template expansion nests too deeply");
             }
             if (template_node.children.len != 1 or template_node.children[0].kind != .element) {
-                return self.failNode(template_node, markup.template_one_child_message);
+                return self.failVoid(template_node, markup.template_one_child_message);
             }
             if (markup.templateSecondSlot(template_node.children[0])) |second| {
-                return self.failNode(second, markup.template_one_slot_message);
+                return self.failVoid(second, markup.template_one_slot_message);
             }
             if (node.children.len != 0 and markup.templateSlot(template_node) == null) {
-                return self.failNode(node.children[0], markup.use_children_without_slot_message);
+                return self.failVoid(node.children[0], markup.use_children_without_slot_message);
             }
 
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "template")) continue;
                 if (std.mem.eql(u8, attribute.name, "on-press")) continue;
                 if (std.mem.startsWith(u8, attribute.name, "on-")) {
-                    return self.failNode(node, markup.use_forwarded_event_message);
+                    return self.failVoid(node, markup.use_forwarded_event_message);
                 }
                 if (!markup.templateDeclaresArg(template_node, attribute.name)) {
-                    return self.failNode(node, markup.use_extra_arg_message);
+                    return self.failVoid(node, markup.use_extra_arg_message);
                 }
             }
 
-            const forwarded_press = if (node.attrEntry("on-press")) |attribute| blk: {
-                var scratch: Ui.ElementOptions = .{};
-                try self.applyMessageAttr(scope, node, &scratch, attribute);
-                break :blk scratch.on_press;
-            } else null;
+            const forwarded_press = try ui.arena.create(?MsgT);
+            forwarded_press.* = null;
+            if (node.attrEntry("on-press")) |attribute| {
+                const scratch = try ui.arena.create(Ui.ElementOptions);
+                scratch.* = .{};
+                try self.applyMessageAttr(scope, node, scratch, attribute);
+                forwarded_press.* = scratch.on_press;
+            }
 
             // Evaluate every arg against the pristine use-site scope before
             // any entry is pushed, so args cannot see each other.
@@ -1636,7 +1691,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             while (args.next()) |token| {
                 const arg = markup.parseTemplateArg(token);
                 if (saved_len + arg_count >= max_scope_depth) {
-                    return self.failNode(node, "template args nest too deep");
+                    return self.failVoid(node, "template args nest too deep");
                 }
                 const payload: ScopeEntry.Payload = if (node.attrEntry(arg.name)) |arg_attr|
                     try self.argPayload(ui, scope, node, arg_attr)
@@ -1644,15 +1699,15 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     // Defaults are literals only — a default cannot see
                     // any scope (validator and compiled-engine parity).
                     if (std.mem.indexOfScalar(u8, default, '{') != null) {
-                        return self.failNode(template_node, markup.template_default_literal_message);
+                        return self.failVoid(template_node, markup.template_default_literal_message);
                     }
                     // Quotes are not string delimiters in a default; they
                     // would render verbatim (validator parity).
                     if (default.len > 0 and (default[0] == '\'' or default[0] == '"')) {
-                        return self.failNode(template_node, markup.template_default_quoted_message);
+                        return self.failVoid(template_node, markup.template_default_quoted_message);
                     }
                     break :blk .{ .value = literalValue(default) };
-                } else return self.failNode(node, markup.use_missing_arg_message);
+                } else return self.failVoid(node, markup.use_missing_arg_message);
                 scope.entries[saved_len + arg_count] = .{
                     .name = arg.name,
                     .payload = payload,
@@ -1663,7 +1718,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // The slot capture: the use-site children plus the scope state
             // to build them under, consumed by the body's <slot/>.
             if (saved_len + arg_count >= max_scope_depth) {
-                return self.failNode(node, "template args nest too deep");
+                return self.failVoid(node, "template args nest too deep");
             }
             scope.entries[saved_len + arg_count] = .{
                 .name = "",
@@ -1703,7 +1758,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 scope.template_ctx = saved_ctx;
                 scope.source_chain = saved_chain;
             }
-            return self.buildElementForwardedPress(ui, scope, template_node.children[0], forwarded_press);
+            try self.buildElementForwardedPressInto(ui, scope, template_node.children[0], forwarded_press, out);
         }
 
         /// A template arg's scope payload: a `{binding}` naming an iterable
@@ -2255,39 +2310,88 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             }
         }
 
-        fn constructMessage(self: *Self, scope: *Scope, node: markup.MarkupNode, expression: markup.MessageExpression) BuildError!MsgT {
+        // Message construction dispatches through one constructor per union
+        // arm, selected by a runtime lookup of the tag. An unrolled
+        // `inline for` over every arm gives the single dispatching function
+        // a stack slot for every arm's message and payload temporaries (in
+        // Debug none are shared), so its frame grew with the arm count times
+        // the message size: megabytes for an app-sized union, on top of the
+        // recursive element build. Each per-arm constructor below holds only
+        // its own arm.
+        const MessageConstructor = *const fn (self: *Self, scope: *Scope, node: markup.MarkupNode, expression: markup.MessageExpression, out: *MsgT) BuildError!void;
+        const message_fields = @typeInfo(MsgT).@"union".fields;
+
+        const message_tag_names: [message_fields.len][]const u8 = blk: {
+            var names: [message_fields.len][]const u8 = undefined;
+            for (message_fields, 0..) |field, index| names[index] = field.name;
+            break :blk names;
+        };
+
+        const message_constructors: [message_fields.len]MessageConstructor = blk: {
             @setEvalBranchQuota(scan_quota);
-            inline for (@typeInfo(MsgT).@"union".fields) |field| {
-                if (std.mem.eql(u8, field.name, expression.tag)) {
-                    if (field.type == void) {
+            var table: [message_fields.len]MessageConstructor = undefined;
+            for (message_fields, 0..) |field, index| table[index] = MessageArm(field.name).construct;
+            break :blk table;
+        };
+
+        const drag_message_constructors: [message_fields.len]MessageConstructor = blk: {
+            @setEvalBranchQuota(scan_quota);
+            var table: [message_fields.len]MessageConstructor = undefined;
+            for (message_fields, 0..) |field, index| table[index] = MessageArm(field.name).constructDrag;
+            break :blk table;
+        };
+
+        fn MessageArm(comptime name: []const u8) type {
+            return struct {
+                const Payload = @FieldType(MsgT, name);
+
+                fn construct(self: *Self, scope: *Scope, node: markup.MarkupNode, expression: markup.MessageExpression, out: *MsgT) BuildError!void {
+                    if (Payload == void) {
                         if (expression.payload.len > 0) {
                             return self.failMsg(node, "message does not take a payload");
                         }
-                        return @unionInit(MsgT, field.name, {});
+                        out.* = @unionInit(MsgT, name, {});
+                    } else {
+                        if (expression.payload.len == 0) {
+                            return self.failMsg(node, "message requires a payload");
+                        }
+                        const value = try self.evalBinding(scope, node, expression.payload, true);
+                        out.* = @unionInit(MsgT, name, try self.coerce(Payload, node, value));
                     }
-                    if (expression.payload.len == 0) {
-                        return self.failMsg(node, "message requires a payload");
-                    }
-                    const value = try self.evalBinding(scope, node, expression.payload, true);
-                    return @unionInit(MsgT, field.name, try self.coerce(field.type, node, value));
                 }
+
+                fn constructDrag(self: *Self, scope: *Scope, node: markup.MarkupNode, expression: markup.MessageExpression, out: *MsgT) BuildError!void {
+                    if (comptime !reflect.declaredWidgetDragDropRecord(Payload)) {
+                        return self.failMsg(node, markup.on_drag_payload_message);
+                    } else {
+                        const value = try self.evalBinding(scope, node, expression.payload, true);
+                        out.* = @unionInit(MsgT, name, std.mem.zeroes(Payload));
+                        @field(out.*, name).sourceId = try self.coerce(@FieldType(Payload, "sourceId"), node, value);
+                    }
+                }
+            };
+        }
+
+        fn messageArmIndex(tag: []const u8) ?usize {
+            for (message_tag_names, 0..) |name, index| {
+                if (std.mem.eql(u8, name, tag)) return index;
             }
-            return self.failMsg(node, "unknown message tag");
+            return null;
+        }
+
+        fn constructMessage(self: *Self, scope: *Scope, node: markup.MarkupNode, expression: markup.MessageExpression) BuildError!MsgT {
+            const index = messageArmIndex(expression.tag) orelse return self.failMsg(node, "unknown message tag");
+            var msg: MsgT = undefined;
+            try message_constructors[index](self, scope, node, expression, &msg);
+            return msg;
         }
 
         fn constructDragMessage(self: *Self, scope: *Scope, node: markup.MarkupNode, expression: markup.MessageExpression) BuildError!MsgT {
             if (expression.payload.len == 0) return self.failMsg(node, markup.on_drag_payload_message);
-            @setEvalBranchQuota(scan_quota);
-            inline for (@typeInfo(MsgT).@"union".fields) |field| {
-                if (std.mem.eql(u8, field.name, expression.tag)) {
-                    if (comptime !reflect.declaredWidgetDragDropRecord(field.type)) return self.failMsg(node, markup.on_drag_payload_message);
-                    const value = try self.evalBinding(scope, node, expression.payload, true);
-                    var payload: field.type = std.mem.zeroes(field.type);
-                    payload.sourceId = try self.coerce(@FieldType(field.type, "sourceId"), node, value);
-                    return @unionInit(MsgT, field.name, payload);
-                }
-            }
-            return self.failMsg(node, markup.on_drag_payload_message);
+            const index = messageArmIndex(expression.tag) orelse return self.failMsg(node, markup.on_drag_payload_message);
+            var msg: MsgT = undefined;
+            try drag_message_constructors[index](self, scope, node, expression, &msg);
+            return msg;
         }
 
         fn coerce(self: *Self, comptime T: type, node: markup.MarkupNode, value: Value) BuildError!T {
