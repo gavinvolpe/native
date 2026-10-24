@@ -1359,6 +1359,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&native_driver_run.step);
         test_step.dependOn(&native_driver_run.step);
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
+        b.step("test-ts-core-host", "Run the TypeScript-core host lifecycle and replay tests without example batteries").dependOn(&host_e2e_run.step);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         const runtime_model_step = b.step("test-ts-runtime-model", "Verify compiled model projections, lazy snapshots, persistence and effects");
         const runtime_model_host = filteredTestArtifact(b, ts_core_artifacts.host.root_module, "ts-runtime-model-host-tests", &.{"compiled host projects"});

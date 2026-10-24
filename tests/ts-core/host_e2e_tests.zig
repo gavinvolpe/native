@@ -297,9 +297,8 @@ const Harness = struct {
         };
         self.harness.null_platform.gpu_surfaces = true;
         self.harness.runtime.options.session_recorder = recorder;
-        self.app_state = try std.testing.allocator.create(App);
-        errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+        self.app_state = try Adapter.create(std.testing.allocator, .{}, e2eOptions());
+        errdefer self.app_state.destroy();
         // Bind the stub host services, the executor mode, and the
         // deterministic clock BEFORE install: init_fx issues the boot
         // request.
@@ -320,8 +319,7 @@ const Harness = struct {
     }
 
     fn destroy(self: *Harness) void {
-        self.app_state.deinit();
-        std.testing.allocator.destroy(self.app_state);
+        self.app_state.destroy();
         self.harness.destroy(std.testing.allocator);
         std.testing.allocator.destroy(self);
     }
@@ -1942,10 +1940,8 @@ test "a recorded compiled-core session replays byte-identically with no host cal
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
-    defer app_state.deinit();
+    const app_state = try Adapter.create(std.testing.allocator, .{}, e2eOptions());
+    defer app_state.destroy();
     app_state.effects.bindHostCalls(HostStub.binding());
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
@@ -2090,10 +2086,8 @@ test "a recorded stream session replays byte-identically with no process launche
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
-    defer app_state.deinit();
+    const app_state = try Adapter.create(std.testing.allocator, .{}, e2eOptions());
+    defer app_state.destroy();
     app_state.effects.bindHostCalls(HostStub.binding());
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
@@ -2184,10 +2178,8 @@ test "a recorded mixed-rejection session replays with identical cross-family ord
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
-    defer app_state.deinit();
+    const app_state = try Adapter.create(std.testing.allocator, .{}, e2eOptions());
+    defer app_state.destroy();
     app_state.effects.bindHostCalls(HostStub.binding());
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
