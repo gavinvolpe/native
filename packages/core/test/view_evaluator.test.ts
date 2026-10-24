@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { register, stripTypeScriptTypes } from "node:module";
+import { register } from "node:module";
 import { pathToFileURL } from "node:url";
 import { runInNewContext } from "node:vm";
 import { checkFile } from "../src/frontend.ts";
@@ -15,23 +15,41 @@ import { appViewSources } from "../src/view_sources.ts";
 import { encodeViewProgram, type ViewProgram } from "../src/view_program.ts";
 import { viewBridgeIdentity, viewBridgeSource } from "../src/view_bridge.ts";
 import * as textLibrary from "../sdk/text.ts";
+import { transpileViewScript } from "./helpers.ts";
 
 register(new URL("../src/devhost_resolver.mjs", import.meta.url), { data: {} });
 
 const examples = new URL("../../../examples/", import.meta.url).pathname;
 const evaluatorSource = fs.readFileSync(new URL("../src/view_evaluator.ts", import.meta.url), "utf8");
-// The realm is a classic script: imports become requires and exports plain declarations.
-const strip = (source: string) => stripTypeScriptTypes(source, { mode: "transform" })
-  .replace(/^import \{([^}]*)\} from ("[^"]+");$/gm, (_all, names: string, spec: string) => `const {${names.replace(/ as /g, ": ")}} = require(${spec});`)
-  .replace(/^export /gm, "");
 
 type Context = Record<string, any>;
+
+test("view realm transpilation preserves enums parameter properties and import aliases", () => {
+  const context: Context = {
+    require: (name: string) => {
+      assert.equal(name, "fixture");
+      return { offset: 2 };
+    },
+  };
+  runInNewContext(transpileViewScript(`
+import { offset as delta } from "fixture";
+export enum Phase { Ready = 4 }
+export class Probe {
+  constructor(public count: number) {}
+  value(): number { return this.count + Phase.Ready + delta; }
+}
+globalThis.answer = new Probe(3).value();
+globalThis.enumName = Phase[4];
+`), context);
+  assert.equal(context.answer, 9);
+  assert.equal(context.enumName, "Ready");
+});
 
 /** Release and development views evaluated side by side in one realm, so
  * both call the very same portable builders. */
 function realm(text: string, program: ViewProgram, contract: ViewContract, core: Record<string, unknown>): Context {
   const identity = viewBridgeIdentity(contract, evaluatorSource);
-  const source = strip(text) + strip(viewBridgeSource(contract, identity)) + strip(evaluatorSource) +
+  const source = transpileViewScript(text) + transpileViewScript(viewBridgeSource(contract, identity)) + transpileViewScript(evaluatorSource) +
     "\nglobalThis.nscvdPrepare = nscvdPrepare; globalThis.nscvdView = nscvdView;" +
     "\nglobalThis.nscvMainView = nscvMainView; globalThis.nscvEmptyVideo = nscvEmptyVideo;" +
     "\nif (typeof nscvWindowView === 'function') globalThis.nscvWindowView = nscvWindowView;" +

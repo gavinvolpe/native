@@ -117,13 +117,11 @@ const Harness = struct {
         self.harness.null_platform.gpu_surfaces = true;
         self.harness.runtime.options.session_recorder = recorder;
 
-        self.app_state = try std.testing.allocator.create(App);
-        errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, .{
+        self.app_state = try Adapter.create(std.testing.allocator, .{
             .host_calls = self.transport.binding(),
             .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
         }, appOptions());
-        errdefer self.app_state.deinit();
+        errdefer self.app_state.destroy();
         self.app = self.app_state.app();
         try self.harness.start(self.app);
         try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_frame = .{
@@ -137,8 +135,7 @@ const Harness = struct {
     }
 
     fn destroy(self: *Harness) void {
-        self.app_state.deinit();
-        std.testing.allocator.destroy(self.app_state);
+        self.app_state.destroy();
         self.harness.destroy(std.testing.allocator);
         self.transport.deinit();
         std.testing.allocator.free(self.executable_path);
@@ -481,13 +478,11 @@ test "journal replay reproduces service results without starting a host" {
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{
+    const app_state = try Adapter.create(std.testing.allocator, .{
         .host_calls = absent_transport.binding(),
         .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
     }, appOptions());
-    defer app_state.deinit();
+    defer app_state.destroy();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
         .verify = true,
@@ -554,13 +549,11 @@ test "a devhost-recorded service session replays in the packaged runtime without
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{
+    const app_state = try Adapter.create(std.testing.allocator, .{
         .host_calls = absent_transport.binding(),
         .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
     }, appOptions());
-    defer app_state.deinit();
+    defer app_state.destroy();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), journal, .{
         .verify = false,

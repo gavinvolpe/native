@@ -114,9 +114,8 @@ const Harness = struct {
         self.harness.null_platform.image_decode = true;
         self.harness.null_platform.window_chrome = config.chrome;
         self.harness.runtime.options.session_recorder = config.recorder;
-        self.app_state = try std.testing.allocator.create(App);
-        errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, config.core, boardOptions());
+        self.app_state = try Adapter.create(std.testing.allocator, config.core, boardOptions());
+        errdefer self.app_state.destroy();
         self.app_state.effects.clock = self.clock.clock();
         self.app = self.app_state.app();
         try self.harness.start(self.app);
@@ -132,8 +131,7 @@ const Harness = struct {
     }
 
     fn destroy(self: *Harness) void {
-        self.app_state.deinit();
-        std.testing.allocator.destroy(self.app_state);
+        self.app_state.destroy();
         self.harness.destroy(std.testing.allocator);
         std.testing.allocator.destroy(self);
     }
@@ -847,10 +845,8 @@ test "a recorded markup session replays byte-identically with verified fingerpri
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, boardOptions());
-    defer app_state.deinit();
+    const app_state = try Adapter.create(std.testing.allocator, .{}, boardOptions());
+    defer app_state.destroy();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
         .verify = true,
@@ -932,10 +928,8 @@ test "a recorded tooltip hover dwell replays its show and hide frames byte-ident
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, boardOptions());
-    defer app_state.deinit();
+    const app_state = try Adapter.create(std.testing.allocator, .{}, boardOptions());
+    defer app_state.destroy();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
         .verify = true,
