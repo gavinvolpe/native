@@ -1754,3 +1754,66 @@ test "structural id goldens: the id algorithm is pinned end to end" {
     try testing.expectEqual(@as(canvas.ObjectId, 10740830058688169295), canvas.globalWidgetId(.tree, .{ .index = 3 }));
     try testing.expectEqual(@as(canvas.ObjectId, 9835495177657875356), canvas.globalWidgetId(.split_divider, canvas.uiKey("divider")));
 }
+
+test "native typed drag retains context through live and captured terminal dispatch while markup stays closed" {
+    const Context = struct { project: [4]u8, revision: u64, component: ?u32 };
+    const Drag = struct {
+        sourceId: u32 = 17,
+        phase: u8 = 0,
+        x: f32 = 0,
+        y: f32 = 0,
+        viewWidth: f32 = 0,
+        viewHeight: f32 = 0,
+        source: Context,
+    };
+    const Message = union(enum) { dragged: Drag, unrelated };
+    const NativeUi = ui_model.Ui(Message);
+    const reflect = @import("ui_markup_reflect.zig");
+    try testing.expect(reflect.nativeWidgetDragRecord(Drag));
+    try testing.expect(!reflect.declaredWidgetDragDropRecord(Drag));
+    const context = Context{ .project = "page".*, .revision = 42, .component = 9 };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = NativeUi.init(arena.allocator());
+    const root = ui.button(.{ .on_drag = .{ .dragged = .{ .source = context } } }, "Drag");
+    const tree = try ui.finalize(root);
+    const id = tree.root.id;
+    const template = tree.msgFor(id, .drag) orelse return error.TestUnexpectedResult;
+    inline for (.{ canvas.WidgetDragPhase.change, canvas.WidgetDragPhase.end, canvas.WidgetDragPhase.cancel }) |phase| {
+        const event = canvas.WidgetDragEvent{ .phase = phase, .point = .{ .x = -12.5, .y = 81.25 } };
+        const view_size = geometry.SizeF.init(800, 600);
+        const live = tree.msgForDrag(id, event, view_size) orelse return error.TestUnexpectedResult;
+        // The runtime uses this captured template route after a source
+        // unmounts; it must preserve the same owned context on end/cancel.
+        const captured = NativeUi.Tree.msgForDragTemplate(template, event, view_size) orelse return error.TestUnexpectedResult;
+        inline for (.{ live, captured }) |message| {
+            try testing.expectEqual(@as(u32, 17), message.dragged.sourceId);
+            try testing.expectEqual(@as(u8, @intFromEnum(phase)), message.dragged.phase);
+            try testing.expectEqual(@as(f32, -12.5), message.dragged.x);
+            try testing.expectEqual(@as(f32, 81.25), message.dragged.y);
+            try testing.expectEqual(@as(f32, 800), message.dragged.viewWidth);
+            try testing.expectEqual(@as(f32, 600), message.dragged.viewHeight);
+            try testing.expectEqualDeep(context, message.dragged.source);
+        }
+    }
+    try testing.expectEqual(@as(u8, 0), template.dragged.phase);
+    try testing.expectEqual(@as(f32, 0), template.dragged.x);
+    try testing.expect(NativeUi.Tree.msgForDragTemplate(.unrelated, .{ .point = .{} }, .init(800, 600)) == null);
+}
+
+test "native drag context never relaxes injected field safety or closed markup ABI" {
+    const reflect = @import("ui_markup_reflect.zig");
+    const Closed = struct { sourceId: u32, phase: u8, x: f32, y: f32, viewWidth: f32, viewHeight: f32 };
+    try testing.expect(reflect.nativeWidgetDragRecord(Closed));
+    try testing.expect(reflect.declaredWidgetDragDropRecord(Closed));
+    inline for (.{
+        struct { sourceId: u32, phase: u1, x: f32, y: f32, viewWidth: f32, viewHeight: f32, context: u64 },
+        struct { sourceId: u32, phase: u8, x: u32, y: f32, viewWidth: f32, viewHeight: f32, context: u64 },
+        struct { sourceId: bool, phase: u8, x: f32, y: f32, viewWidth: f32, viewHeight: f32, context: u64 },
+        struct { sourceId: u32, phase: u8, x: f32, y: f32, viewWidth: f32, context: u64 },
+        void,
+    }) |Unsafe| {
+        try testing.expect(!reflect.nativeWidgetDragRecord(Unsafe));
+        try testing.expect(!reflect.declaredWidgetDragDropRecord(Unsafe));
+    }
+}

@@ -290,6 +290,14 @@ pub fn declaredWidgetDragDropRecord(comptime T: type) bool {
         else => return false,
     };
     if (info.fields.len != 6) return false;
+    return nativeWidgetDragRecord(T);
+}
+
+/// Native Zig handlers can retain typed context alongside the injected drag
+/// fields. Markup still uses the closed six-field record above. Only these
+/// numeric fields are interpreted or overwritten by native drag dispatch.
+pub fn nativeWidgetDragRecord(comptime T: type) bool {
+    if (@typeInfo(T) != .@"struct") return false;
     if (!@hasField(T, "sourceId") or !@hasField(T, "phase") or !@hasField(T, "x") or !@hasField(T, "y") or
         !@hasField(T, "viewWidth") or !@hasField(T, "viewHeight")) return false;
     if (!isNumeric(@FieldType(T, "sourceId"))) return false;

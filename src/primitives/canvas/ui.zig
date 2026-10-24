@@ -813,7 +813,9 @@ pub fn Ui(comptime Msg: type) type {
             /// is the closed `{ sourceId, phase, x, y, viewWidth,
             /// viewHeight }` record: markup supplies `sourceId`, while the
             /// runtime supplies phase (0 change, 1 end, 2 cancel) and the
-            /// four geometry fields.
+            /// four geometry fields. Zig-authored handlers may carry extra
+            /// typed context; dispatch preserves it as part of the Msg value.
+            /// As with other handlers, borrowed context must outlive the tree.
             on_drag: ?Msg = null,
             /// Double-click Msg (markup: `on-double-press`): dispatched
             /// on a release whose click count reached 2, in place of
@@ -1296,7 +1298,7 @@ pub fn Ui(comptime Msg: type) type {
             /// phase-0 update unmounted the live handler before cancellation.
             pub fn msgForDragTemplate(template: Msg, drag: canvas.WidgetDragEvent, view_size: geometry.SizeF) ?Msg {
                 return switch (template) {
-                    inline else => |payload, tag| if (comptime reflect.declaredWidgetDragDropRecord(@TypeOf(payload))) blk: {
+                    inline else => |payload, tag| if (comptime reflect.nativeWidgetDragRecord(@TypeOf(payload))) blk: {
                         var out = payload;
                         out.phase = dragNumber(@FieldType(@TypeOf(payload), "phase"), @floatFromInt(@intFromEnum(drag.phase)));
                         out.x = dragNumber(@FieldType(@TypeOf(payload), "x"), drag.point.x);
