@@ -1,3 +1,6 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const plan_key_index = @import("plan_key_index.zig");
 const compiled_cache = @import("render_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
@@ -209,7 +212,46 @@ fn findRenderPathGeometryCacheEntry(entries: []const RenderPathGeometryCacheEntr
     return null;
 }
 
+// Match the resource planner's half-full 2048-entry runtime budget.
+// Small and oversized library inputs retain the original scans.
+const path_geometry_cache_index_slots = 4096;
+const PathGeometryCacheIndex = plan_key_index.HashSlots(path_geometry_cache_index_slots);
+const PathGeometryCacheIndexScratch = struct {
+    previous: PathGeometryCacheIndex = .{},
+    entry: PathGeometryCacheIndex = .{},
+};
+const path_geometry_cache_index_scratch = @import("lazy_tls.zig").LazyTls(PathGeometryCacheIndexScratch);
+
+fn findRenderPathGeometryCacheEntryIndexed(previous_index: *const PathGeometryCacheIndex, previous: []const RenderPathGeometryCacheEntry, key: RenderPathGeometryKey, key_hash: u64) ?usize {
+    var p = PathGeometryCacheIndex.probe(key_hash);
+    while (previous_index.next(&p)) |candidate| {
+        if (renderPathGeometryKeysEqual(previous[candidate].key, key)) return candidate;
+    }
+    return null;
+}
+
+fn renderPathGeometryKeyHash(key: RenderPathGeometryKey) u64 {
+    var hash = plan_key_index.mixHash(key.fingerprint ^ @as(u64, @intFromEnum(key.kind)));
+    hash = plan_key_index.mixHash(hash ^ @as(u64, key.id orelse 0) ^ @as(u64, @intCast(key.command_index)));
+    return plan_key_index.mixHash(hash ^ @as(u64, @intFromBool(key.id != null)));
+}
+
+// Preserve the scan path for callers reusing their previous-entry buffer.
+fn cacheEntrySlicesOverlap(a: []const RenderPathGeometryCacheEntry, b: []const RenderPathGeometryCacheEntry) bool {
+    if (a.len == 0 or b.len == 0) return false;
+    const a_start = @intFromPtr(a.ptr);
+    const b_start = @intFromPtr(b.ptr);
+    return if (a_start <= b_start)
+        b_start - a_start < a.len * @sizeOf(RenderPathGeometryCacheEntry)
+    else
+        a_start - b_start < b.len * @sizeOf(RenderPathGeometryCacheEntry);
+}
+
+// Deterministic regression evidence; no counter or increment in application builds.
+threadlocal var cache_key_comparisons: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {};
+
 fn renderPathGeometryKeysEqual(a: RenderPathGeometryKey, b: RenderPathGeometryKey) bool {
+    if (comptime builtin.is_test) cache_key_comparisons += 1;
     return a.kind == b.kind and
         a.id == b.id and
         a.command_index == b.command_index and
@@ -305,8 +347,54 @@ pub const RenderPathGeometryCachePlanner = struct {
 
     pub fn build(self: *RenderPathGeometryCachePlanner, geometry_plan: RenderPathGeometryPlan, previous: []const RenderPathGeometryCacheEntry, frame_index: u64) Error!RenderPathGeometryCachePlan {
         self.reset();
+        // Keyed lookups ride the probe-table index whenever the inputs
+        // fit its half-full bound (the runtime budgets always do);
+        // oversized library inputs keep the linear scans. Same outputs
+        // either way — the index resolves to the lowest-index equal
+        // entry exactly like the scans it replaces.
+        const use_index = (geometry_plan.geometries.len >= plan_key_index.min_entries_for_index or
+            previous.len >= plan_key_index.min_entries_for_index) and
+            plan_key_index.fitsHashSlots(path_geometry_cache_index_slots, previous.len) and
+            plan_key_index.fitsHashSlots(path_geometry_cache_index_slots, geometry_plan.geometries.len) and
+            !cacheEntrySlicesOverlap(self.entries, previous);
+        const index_scratch: ?*PathGeometryCacheIndexScratch = if (use_index) path_geometry_cache_index_scratch.get() else null;
+        if (index_scratch) |scratch| {
+            scratch.previous.reset();
+            for (previous, 0..) |entry, index| {
+                var p = PathGeometryCacheIndex.probe(renderPathGeometryKeyHash(entry.key));
+                while (scratch.previous.next(&p)) |_| {}
+                scratch.previous.insert(p, @intCast(index));
+            }
+            scratch.entry.reset();
+        }
+
         for (geometry_plan.geometries, 0..) |geometry_plan_item, geometry_index| {
             const key = renderPathGeometryKey(geometry_plan_item);
+            const key_hash = if (use_index) renderPathGeometryKeyHash(key) else 0;
+            if (index_scratch) |scratch| {
+                var p = PathGeometryCacheIndex.probe(key_hash);
+                var duplicate = false;
+                while (scratch.entry.next(&p)) |candidate| {
+                    if (renderPathGeometryKeysEqual(self.entries[candidate].key, key)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate) continue;
+                const previous_index = findRenderPathGeometryCacheEntryIndexed(&scratch.previous, previous, key, key_hash);
+                try self.appendAction(.{
+                    .kind = if (previous_index == null) .upload else .retain,
+                    .key = key,
+                    .geometry_index = geometry_index,
+                    .cache_index = previous_index,
+                });
+                try self.appendEntry(.{
+                    .key = key,
+                    .last_used_frame = frame_index,
+                });
+                scratch.entry.insert(p, @intCast(self.entry_len - 1));
+                continue;
+            }
             if (findRenderPathGeometryCacheEntry(self.entries[0..self.entry_len], key) != null) continue;
 
             const previous_index = findRenderPathGeometryCacheEntry(previous, key);
@@ -323,7 +411,19 @@ pub const RenderPathGeometryCachePlanner = struct {
         }
 
         for (previous, 0..) |entry, cache_index| {
-            if (findRenderPathGeometryCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
+            if (index_scratch) |scratch| {
+                var p = PathGeometryCacheIndex.probe(renderPathGeometryKeyHash(entry.key));
+                var kept = false;
+                while (scratch.entry.next(&p)) |candidate| {
+                    if (renderPathGeometryKeysEqual(self.entries[candidate].key, entry.key)) {
+                        kept = true;
+                        break;
+                    }
+                }
+                if (kept) continue;
+            } else if (findRenderPathGeometryCacheEntry(self.entries[0..self.entry_len], entry.key) != null) {
+                continue;
+            }
             try self.appendAction(.{
                 .kind = .evict,
                 .key = entry.key,
@@ -358,4 +458,141 @@ fn referenceTransformScale(transform: Affine) f32 {
 
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
+}
+
+fn cacheTestItem(index: usize) RenderPathGeometry {
+    return .{ .kind = .fill, .command_index = index, .id = @intCast(index + 1), .fingerprint = @intCast(index * 11) };
+}
+
+test "indexed path geometry cache preserves collisions first matches order and partial failure" {
+    var previous: [64]RenderPathGeometryCacheEntry = undefined;
+    for (&previous, 0..) |*entry, i| entry.* = .{ .key = renderPathGeometryKey(cacheTestItem(i)), .last_used_frame = 1 };
+    // Unequal keys deliberately share a probe bucket with the current mixer.
+    previous[1].key.fingerprint = 6069;
+    try std.testing.expectEqual(PathGeometryCacheIndex.probe(renderPathGeometryKeyHash(previous[0].key)).pos, PathGeometryCacheIndex.probe(renderPathGeometryKeyHash(previous[1].key)).pos);
+    previous[2].key.id = null;
+    previous[2].key.command_index = 9;
+    previous[2].key.fingerprint = 333;
+    previous[3].key.id = 0;
+    previous[3].key.fingerprint = 333;
+    previous[4].key = previous[0].key;
+    previous[9].key.id = null;
+    previous[9].key.command_index = 10;
+    previous[9].key.fingerprint = 333;
+    previous[7].key.kind = .stroke;
+    previous[8].key = previous[7].key;
+    previous[8].key.kind = .fill;
+    var current: [64]RenderPathGeometry = undefined;
+    for (&current, 0..) |*item, i| {
+        const k = previous[i].key;
+        item.* = .{ .kind = k.kind, .id = k.id, .command_index = k.command_index, .fingerprint = k.fingerprint };
+    }
+    current[0] = cacheTestItem(63);
+    current[1] = cacheTestItem(0);
+    current[2] = .{ .kind = .fill, .id = 2, .fingerprint = 6069 };
+    current[3] = .{ .kind = .fill, .id = null, .command_index = 9, .fingerprint = 333 };
+    current[4] = .{ .kind = .fill, .id = 0, .fingerprint = 333 };
+    current[5] = current[1];
+    current[6] = .{ .kind = .fill, .id = 7, .fingerprint = 999 };
+    var entries: [64]RenderPathGeometryCacheEntry = undefined;
+    var actions: [128]RenderPathGeometryCacheAction = undefined;
+    var planner = RenderPathGeometryCachePlanner.init(&entries, &actions);
+    const result = try planner.build(.{ .geometries = &current }, &previous, 2);
+    try std.testing.expectEqual(@as(usize, 62), result.entries.len);
+    try std.testing.expectEqual(@as(usize, 64), result.actions.len);
+    for ([_]usize{ 63, 0, 1, 2, 3 }, 0..) |old, i| {
+        try std.testing.expectEqual(RenderPathGeometryCacheActionKind.retain, result.actions[i].kind);
+        try std.testing.expectEqual(@as(?usize, old), result.actions[i].cache_index);
+        try std.testing.expectEqual(@as(?usize, i), result.actions[i].geometry_index);
+        try std.testing.expectEqualDeep(previous[old].key, result.entries[i].key);
+    }
+    try std.testing.expectEqual(RenderPathGeometryCacheActionKind.upload, result.actions[5].kind);
+    try std.testing.expectEqual(@as(?usize, 6), result.actions[5].geometry_index);
+    try std.testing.expectEqual(@as(?usize, null), result.actions[5].cache_index);
+    for (7..63) |old| {
+        const a = result.actions[old - 1];
+        try std.testing.expectEqual(RenderPathGeometryCacheActionKind.retain, a.kind);
+        try std.testing.expectEqual(@as(?usize, old), a.cache_index);
+        try std.testing.expectEqual(@as(?usize, old), a.geometry_index);
+    }
+    for ([_]usize{ 5, 6 }, 62..) |old, i| {
+        try std.testing.expectEqual(RenderPathGeometryCacheActionKind.evict, result.actions[i].kind);
+        try std.testing.expectEqual(@as(?usize, old), result.actions[i].cache_index);
+        try std.testing.expectEqual(@as(?usize, null), result.actions[i].geometry_index);
+    }
+    for (result.entries) |entry| try std.testing.expectEqual(@as(u64, 2), entry.last_used_frame);
+
+    // Keep the original action-before-entry commit and eviction ordering.
+    planner = RenderPathGeometryCachePlanner.init(entries[0..0], actions[0..1]);
+    try std.testing.expectError(error.PathGeometryCacheListFull, planner.build(.{ .geometries = &current }, &previous, 3));
+    try std.testing.expectEqual(@as(usize, 1), planner.action_len);
+    try std.testing.expectEqual(@as(usize, 0), planner.entry_len);
+    try std.testing.expectEqual(@as(?usize, 63), planner.actions[0].cache_index);
+    planner = RenderPathGeometryCachePlanner.init(&entries, actions[0..0]);
+    try std.testing.expectError(error.PathGeometryCacheListFull, planner.build(.{ .geometries = &current }, &previous, 3));
+    try std.testing.expectEqual(@as(usize, 0), planner.entry_len);
+    try std.testing.expectEqual(@as(usize, 0), planner.action_len);
+    planner = RenderPathGeometryCachePlanner.init(&entries, actions[0..63]);
+    try std.testing.expectError(error.PathGeometryCacheListFull, planner.build(.{ .geometries = &current }, &previous, 3));
+    try std.testing.expectEqual(@as(usize, 62), planner.entry_len);
+    try std.testing.expectEqual(@as(usize, 63), planner.action_len);
+    try std.testing.expectEqual(@as(?usize, 5), planner.actions[62].cache_index);
+    // A successful build after those failures must reset scratch and output.
+    planner = RenderPathGeometryCachePlanner.init(&entries, &actions);
+    const retry = try planner.build(.{ .geometries = &current }, &previous, 4);
+    try std.testing.expectEqual(@as(usize, 64), retry.actions.len);
+}
+
+test "indexed path geometry cache bounds dense retained lookup work and keeps oversized fallback" {
+    const count = 1024;
+    var current: [count]RenderPathGeometry = undefined;
+    var previous: [count]RenderPathGeometryCacheEntry = undefined;
+    var entries: [count]RenderPathGeometryCacheEntry = undefined;
+    var actions: [count]RenderPathGeometryCacheAction = undefined;
+    for (&current, &previous, 0..) |*item, *entry, i| {
+        item.* = cacheTestItem(i);
+        entry.* = .{ .key = renderPathGeometryKey(item.*), .last_used_frame = 1 };
+    }
+    cache_key_comparisons = 0;
+    const result = try (RenderPathGeometryPlan{ .geometries = &current }).cachePlan(&previous, 2, &entries, &actions);
+    const comparisons = cache_key_comparisons;
+    try std.testing.expectEqual(@as(usize, count), result.retainCount());
+    try std.testing.expect(comparisons > 0);
+    try std.testing.expect(comparisons < 16 * count);
+    for (result.actions, 0..) |action, i| {
+        try std.testing.expectEqual(@as(?usize, i), action.cache_index);
+        try std.testing.expectEqual(@as(?usize, i), action.geometry_index);
+    }
+
+    // Library callers can exceed the runtime index budget: no truncation.
+    const oversized_count = PathGeometryCacheIndex.max_entries + 1;
+    var oversized: [oversized_count]RenderPathGeometry = undefined;
+    for (&oversized) |*item| item.* = cacheTestItem(0);
+    oversized[oversized_count - 1] = cacheTestItem(1);
+    const fallback = try (RenderPathGeometryPlan{ .geometries = &oversized }).cachePlan(&.{}, 3, entries[0..2], actions[0..2]);
+    try std.testing.expectEqual(@as(usize, 2), fallback.entries.len);
+    try std.testing.expectEqual(@as(usize, 2), fallback.actions.len);
+    try std.testing.expectEqual(@as(usize, 2), fallback.uploadCount());
+    try std.testing.expectEqual(@as(?usize, 0), fallback.actions[0].geometry_index);
+    try std.testing.expectEqual(@as(?usize, 2048), fallback.actions[1].geometry_index);
+    try std.testing.expectEqualDeep(renderPathGeometryKey(cacheTestItem(1)), fallback.entries[1].key);
+}
+
+test "path geometry cache preserves in-place previous entry behavior" {
+    var previous: [64]RenderPathGeometryCacheEntry = undefined;
+    var current: [64]RenderPathGeometry = undefined;
+    var actions: [128]RenderPathGeometryCacheAction = undefined;
+    for (&previous, &current, 0..) |*entry, *item, i| {
+        entry.* = .{ .key = renderPathGeometryKey(cacheTestItem(i)), .last_used_frame = 1 };
+        item.* = cacheTestItem(63 - i);
+    }
+    try std.testing.expect(cacheEntrySlicesOverlap(&previous, previous[16..]));
+    try std.testing.expect(!cacheEntrySlicesOverlap(previous[0..16], previous[16..]));
+    const result = try (RenderPathGeometryPlan{ .geometries = &current }).cachePlan(&previous, 2, &previous, &actions);
+    try std.testing.expectEqual(@as(usize, 64), result.entries.len);
+    try std.testing.expectEqual(@as(usize, 64), result.actions.len);
+    for (result.actions, 0..) |action, i| {
+        try std.testing.expectEqual(@as(RenderPathGeometryCacheActionKind, if (i < 32) .retain else .upload), action.kind);
+        try std.testing.expectEqual(if (i < 32) @as(?usize, 63 - i) else null, action.cache_index);
+    }
 }
