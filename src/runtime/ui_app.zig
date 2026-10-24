@@ -106,6 +106,11 @@ pub const UiAppFeatures = struct {
     /// `canvas.CompiledMarkupView` so no parser code (or its diagnostics)
     /// ships in the binary; the markup machinery then compiles to nothing.
     runtime_markup: bool = true,
+    /// Per-app compiled-fragment watch capacity. Debug builds with runtime
+    /// markup allocate this many watch slots; other builds allocate none.
+    /// Raise it for apps with more independent compiled markup documents.
+    /// Registrations beyond this capacity retain the compiled-only fallback.
+    max_watched_fragments: usize = 16,
     /// Generated TypeScript views observe compiled state directly. This
     /// selects their stateless host handle instead of a decoded model mirror.
     compiled_model: bool = false,
@@ -121,6 +126,11 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
 }
 
 pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime features: UiAppFeatures) type {
+    // The markup-development policy carries capacities as u32 values.
+    // Zero is not a watch configuration: use runtime_markup=false to omit
+    // the engine, or leave Options.fragment_watch unset to omit the watch.
+    if (features.max_watched_fragments == 0 or features.max_watched_fragments > std.math.maxInt(u32))
+        @compileError("UiAppFeatures.max_watched_fragments must be between 1 and maxInt(u32)");
     return struct {
         const Self = @This();
 
@@ -144,11 +154,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// reloading compiled view's (Debug).
         const provenance_enabled = features.runtime_markup or (features.view_reload and view_reload_enabled);
 
-        /// Fixed budget of watched fragments per app. Registrations past
-        /// it are not watched (a teaching warning names the budget when
-        /// the watch arms) — a view embedding more compiled fragments
-        /// than this wants consolidation more than it wants polling.
-        pub const max_watched_fragments: usize = 16;
+        /// Compile-time watch capacity selected by this app's features.
+        /// Registrations past it remain compiled-only and produce a warning.
+        /// Public so app registries can reject overflow at compile time.
+        pub const max_watched_fragments: usize = features.max_watched_fragments;
 
         /// One registered fragment's hot-reload state.
         const MarkupFragmentSlot = struct {
@@ -4238,7 +4247,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const plan = if (self.options.markup_development_policy) |callback| markup_development.watch(callback, false, false, false, true, fragment_watch.fragments.len, max_watched_fragments) else null;
             if (if (plan) |value| value[3] != 0 else fragment_watch.fragments.len > max_watched_fragments) {
                 ui_app_log.warn(
-                    "fragment watch: {d} fragments registered but the watch budget is {d} (max_watched_fragments) - the rest stay compiled-only; consolidate fragments or raise the budget",
+                    "fragment watch: {d} fragments registered but the watch budget is {d} (max_watched_fragments) - the rest stay compiled-only; raise UiAppFeatures.max_watched_fragments",
                     .{ fragment_watch.fragments.len, max_watched_fragments },
                 );
             }

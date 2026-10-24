@@ -2455,7 +2455,11 @@ test "with imports the compiled view stays the baseline until the watched closur
 const CompiledCounterView = canvas.CompiledMarkupView(CounterModel, CounterMsg, counter_markup);
 
 test "a compiled markup view drives the ui app with the runtime markup engine compiled out" {
-    const LeanApp = ui_app_model.UiAppWithFeatures(CounterModel, CounterMsg, .{ .runtime_markup = false });
+    const LeanApp = ui_app_model.UiAppWithFeatures(CounterModel, CounterMsg, .{
+        .runtime_markup = false,
+        .max_watched_fragments = 24,
+    });
+    try std.testing.expectEqual(@as(usize, 24), LeanApp.max_watched_fragments);
 
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
@@ -2470,7 +2474,9 @@ test "a compiled markup view drives the ui app with the runtime markup engine co
         .update = counterUpdate,
         .view = CompiledCounterView.build,
         .on_command = counterCommand,
+        .fragment_watch = .{ .fragments = &hybrid_counter_fragments, .io = std.testing.io },
     });
+    try std.testing.expect(@TypeOf(app_state.markup_fragment_slots) == void);
     defer app_state.deinit();
     const app = app_state.app();
     try harness.start(app);
@@ -3205,6 +3211,124 @@ test "editing a shared imported file reloads every fragment whose imports reach 
     try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
     try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Badge A") != null);
     try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Badge B") != null);
+}
+
+// Every entry is a different compiled document, not repeated registrations
+// of one key: roots beyond the default capacity must obtain their own overrides.
+const capacity_fragment_count = 21;
+
+fn capacityFragmentMarkup(comptime index: usize, comptime edited: bool) []const u8 {
+    return std.fmt.comptimePrint("<text>Root {d} {s}</text>", .{ index, if (edited) "after" else "before" });
+}
+
+fn CapacityFragmentView(comptime index: usize) type {
+    return canvas.CompiledMarkupView(CounterModel, CounterMsg, capacityFragmentMarkup(index, false));
+}
+
+fn capacityFragmentsView(ui: *CounterApp.Ui, model: *const CounterModel) CounterApp.Ui.Node {
+    const nodes = ui.arena.alloc(CounterApp.Ui.Node, capacity_fragment_count) catch @panic("fixture allocation");
+    inline for (0..capacity_fragment_count) |index| {
+        nodes[index] = CapacityFragmentView(index).build(ui, model);
+    }
+    return ui.column(.{ .gap = 0 }, nodes);
+}
+
+fn exerciseFragmentCapacity(comptime AppT: type, comptime expected_watched: usize) !void {
+    // This fixture instantiates 21 independent compiled documents in one test.
+    @setEvalBranchQuota(100_000);
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var fragments: [capacity_fragment_count]canvas.MarkupFragment = undefined;
+    var owned_paths: [capacity_fragment_count][:0]u8 = undefined;
+    var paths_owned: usize = 0;
+    defer for (owned_paths[0..paths_owned]) |path| std.testing.allocator.free(path);
+    inline for (0..capacity_fragment_count) |index| {
+        const name = std.fmt.comptimePrint("root-{d}.native", .{index});
+        try temporary.dir.writeFile(io, .{ .sub_path = name, .data = capacityFragmentMarkup(index, false) });
+        fragments[index] = CapacityFragmentView(index).fragment(name);
+        owned_paths[index] = try temporary.dir.realPathFileAlloc(io, name, std.testing.allocator);
+        fragments[index].path = owned_paths[index];
+        paths_owned += 1;
+    }
+    // Key identity matters to lookup, independently of the filesystem paths.
+    for (fragments, 0..) |fragment, index| {
+        try std.testing.expect(fragment.key != null);
+        for (fragments[index + 1 ..]) |other| try std.testing.expect(fragment.key != other.key);
+    }
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    // Leak-check the app, every active cache, both reload arenas and spare
+    // initialized slots. App.create avoids an app-sized test stack frame.
+    const state = try AppT.create(std.testing.allocator, .{
+        .name = "fragment-capacity",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = counterUpdate,
+        .view = capacityFragmentsView,
+        .fragment_watch = .{ .fragments = &fragments, .io = io },
+    });
+    defer state.destroy();
+    state.model.count = 7;
+    const app = state.app();
+    try installCounterApp(harness, app);
+    try std.testing.expectEqual(AppT.max_watched_fragments, state.markup_fragment_slots.len);
+    try std.testing.expect(harness.runtime.markup_watch_armed);
+    try pollCounterFragments(harness, app);
+    for (state.markup_fragment_slots, 0..) |slot, index| {
+        try std.testing.expectEqual(@as(usize, if (index < expected_watched) 1 else 0), slot.resolve_attempts);
+        try std.testing.expect(slot.document == null);
+    }
+    // Editing ALL roots proves adding five new roots does not sacrifice the
+    // original sixteen, and default overflow does not overwrite earlier slots.
+    inline for (0..capacity_fragment_count) |index| {
+        try temporary.dir.writeFile(io, .{
+            .sub_path = std.fmt.comptimePrint("root-{d}.native", .{index}),
+            .data = capacityFragmentMarkup(index, true),
+        });
+    }
+    try pollCounterFragments(harness, app);
+    inline for (0..capacity_fragment_count) |index| {
+        const wanted = std.fmt.comptimePrint("Root {d} {s}", .{ index, if (index < expected_watched) "after" else "before" });
+        try std.testing.expectEqual(@as(usize, 1), countTextIn(state.tree.?.root, wanted));
+        if (index < expected_watched) try std.testing.expect(state.markup_fragment_slots[index].document != null);
+    }
+    try std.testing.expectEqual(@as(u32, 7), state.model.count);
+    try pollCounterFragments(harness, app);
+    for (state.markup_fragment_slots, 0..) |slot, index| {
+        try std.testing.expectEqual(@as(usize, if (index < expected_watched) 2 else 0), slot.resolve_attempts);
+    }
+    // All watched identities return to their independent compiled baselines.
+    inline for (0..capacity_fragment_count) |index| {
+        try temporary.dir.writeFile(io, .{
+            .sub_path = std.fmt.comptimePrint("root-{d}.native", .{index}),
+            .data = capacityFragmentMarkup(index, false),
+        });
+    }
+    try pollCounterFragments(harness, app);
+    inline for (0..capacity_fragment_count) |index| {
+        const wanted = std.fmt.comptimePrint("Root {d} before", .{index});
+        try std.testing.expectEqual(@as(usize, 1), countTextIn(state.tree.?.root, wanted));
+    }
+    for (state.markup_fragment_slots, 0..) |slot, index| {
+        try std.testing.expect(slot.document == null);
+        try std.testing.expectEqual(@as(usize, if (index < expected_watched) 3 else 0), slot.resolve_attempts);
+    }
+}
+
+test "per-app fragment capacity watches every distinct root beyond the default budget" {
+    const ExpandedApp = ui_app_model.UiAppWithFeatures(CounterModel, CounterMsg, .{ .max_watched_fragments = 24 });
+    try std.testing.expectEqual(@as(usize, 24), ExpandedApp.max_watched_fragments);
+    try exerciseFragmentCapacity(ExpandedApp, capacity_fragment_count);
+}
+
+test "default fragment capacity keeps overflow compiled and retains its first sixteen roots" {
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+    try std.testing.expectEqual(@as(usize, 16), CounterApp.max_watched_fragments);
+    try exerciseFragmentCapacity(CounterApp, 16);
 }
 
 test "fragment watch detects preserved timestamps atomic saves and root recreation" {
