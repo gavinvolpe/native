@@ -53,6 +53,7 @@ const runtime_effects = @import("effects.zig");
 const terminal_session = @import("terminal_session.zig");
 const ui_app_provenance = @import("ui_app_provenance.zig");
 const markup_development = @import("markup_development_policy.zig");
+const markup_watch_cache = @import("markup_watch_cache.zig");
 
 const Runtime = core.Runtime;
 const App = core.App;
@@ -105,6 +106,11 @@ pub const UiAppFeatures = struct {
     /// `canvas.CompiledMarkupView` so no parser code (or its diagnostics)
     /// ships in the binary; the markup machinery then compiles to nothing.
     runtime_markup: bool = true,
+    /// Per-app compiled-fragment watch capacity. Debug builds with runtime
+    /// markup allocate this many watch slots; other builds allocate none.
+    /// Raise it for apps with more independent compiled markup documents.
+    /// Registrations beyond this capacity retain the compiled-only fallback.
+    max_watched_fragments: usize = 16,
     /// Generated TypeScript views observe compiled state directly. This
     /// selects their stateless host handle instead of a decoded model mirror.
     compiled_model: bool = false,
@@ -120,6 +126,11 @@ pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
 }
 
 pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime features: UiAppFeatures) type {
+    // The markup-development policy carries capacities as u32 values.
+    // Zero is not a watch configuration: use runtime_markup=false to omit
+    // the engine, or leave Options.fragment_watch unset to omit the watch.
+    if (features.max_watched_fragments == 0 or features.max_watched_fragments > std.math.maxInt(u32))
+        @compileError("UiAppFeatures.max_watched_fragments must be between 1 and maxInt(u32)");
     return struct {
         const Self = @This();
 
@@ -143,11 +154,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// reloading compiled view's (Debug).
         const provenance_enabled = features.runtime_markup or (features.view_reload and view_reload_enabled);
 
-        /// Fixed budget of watched fragments per app. Registrations past
-        /// it are not watched (a teaching warning names the budget when
-        /// the watch arms) — a view embedding more compiled fragments
-        /// than this wants consolidation more than it wants polling.
-        pub const max_watched_fragments: usize = 16;
+        /// Compile-time watch capacity selected by this app's features.
+        /// Registrations past it remain compiled-only and produce a warning.
+        /// Public so app registries can reject overflow at compile time.
+        pub const max_watched_fragments: usize = features.max_watched_fragments;
 
         /// One registered fragment's hot-reload state.
         const MarkupFragmentSlot = struct {
@@ -171,15 +181,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// updated on every divergence (including failed parses, so
             /// one bad save teaches once, not once per poll).
             hash: u64 = 0,
+            observed: markup_watch_cache.Cache,
+            resolve_attempts: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
+            resolve_allocator_for_test: if (builtin.is_test) ?std.mem.Allocator else void = if (builtin.is_test) null else {},
         };
 
         fn markupFragmentSlotsInit(backing: std.mem.Allocator) [max_watched_fragments]MarkupFragmentSlot {
             var slots: [max_watched_fragments]MarkupFragmentSlot = undefined;
             for (&slots) |*slot| {
-                slot.* = .{ .arenas = .{
-                    std.heap.ArenaAllocator.init(backing),
-                    std.heap.ArenaAllocator.init(backing),
-                } };
+                slot.* = .{
+                    .arenas = .{
+                        std.heap.ArenaAllocator.init(backing),
+                        std.heap.ArenaAllocator.init(backing),
+                    },
+                    .observed = .init(backing),
+                };
             }
             return slots;
         }
@@ -1597,6 +1613,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 for (&self.markup_fragment_slots) |*slot| {
                     slot.arenas[0].deinit();
                     slot.arenas[1].deinit();
+                    slot.observed.deinit();
                 }
             }
             for (&self.window_slots) |*slot| {
@@ -4230,7 +4247,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const plan = if (self.options.markup_development_policy) |callback| markup_development.watch(callback, false, false, false, true, fragment_watch.fragments.len, max_watched_fragments) else null;
             if (if (plan) |value| value[3] != 0 else fragment_watch.fragments.len > max_watched_fragments) {
                 ui_app_log.warn(
-                    "fragment watch: {d} fragments registered but the watch budget is {d} (max_watched_fragments) - the rest stay compiled-only; consolidate fragments or raise the budget",
+                    "fragment watch: {d} fragments registered but the watch budget is {d} (max_watched_fragments) - the rest stay compiled-only; raise UiAppFeatures.max_watched_fragments",
                     .{ fragment_watch.fragments.len, max_watched_fragments },
                 );
             }
@@ -4242,6 +4259,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 _ = slot.arenas[scratch_index].reset(.retain_capacity);
                 slot.baseline_hash = embeddedClosureHash(slot.arenas[scratch_index].allocator(), spec.source, spec.sources, self.options.markup_development_policy, self.options.expression_policy);
                 slot.hash = slot.baseline_hash;
+                slot.observed.invalidate();
             }
             return count > 0;
         }
@@ -4356,8 +4374,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Timer-driven poll of every registered fragment (Debug dev runs
         /// only), riding the same reserved timer as the root watch. Each
-        /// fragment's whole import closure is re-resolved and hashed per
-        /// poll, so a change to a SHARED imported file reloads every
+        /// fragment's last observed import closure is content-checked before
+        /// resolving again, so a change to a SHARED imported file reloads every
         /// fragment whose closure reaches it — one edit, one rebuild, all
         /// dependents fresh. Same degrade family as the root watch: a
         /// failed parse keeps that fragment's last good view and records
@@ -4369,16 +4387,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const count = @min(fragment_watch.fragments.len, max_watched_fragments);
             var any_adopted = false;
             for (fragment_watch.fragments[0..count], self.markup_fragment_slots[0..count]) |spec, *slot| {
+                if (!slot.observed.changed(fragment_watch.io)) continue;
+                slot.observed.begin();
                 const next_index = slot.arena_index ^ 1;
                 _ = slot.arenas[next_index].reset(.retain_capacity);
                 const arena = slot.arenas[next_index].allocator();
-                const source = readMarkupFile(fragment_watch.io, arena, spec.path) orelse continue;
-                var disk_loader = DiskImportLoader{ .io = fragment_watch.io };
+                const root_source = readMarkupFile(fragment_watch.io, arena, spec.path);
+                slot.observed.observe(spec.path, root_source, 1 + canvas.ui_markup.max_imported_files);
+                const source = root_source orelse continue;
+                var disk_loader = DiskImportLoader{ .io = fragment_watch.io, .observed = &slot.observed };
                 const watch_dir = std.fs.path.dirname(spec.path) orelse "";
                 var hashing = HashingLoader.init(disk_loader.loader(), source, watch_dir);
                 hashing.policy = self.options.markup_development_policy;
                 var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
-                const document = canvas.ui_markup.resolveImportsWithPolicy(self.options.expression_policy, arena, spec.path, source, hashing.loader(), &diagnostic) catch |err| {
+                if (comptime builtin.is_test) slot.resolve_attempts += 1;
+                const resolve_arena = if (comptime builtin.is_test) slot.resolve_allocator_for_test orelse arena else arena;
+                const document = canvas.ui_markup.resolveImportsWithPolicy(self.options.expression_policy, resolve_arena, spec.path, source, hashing.loader(), &diagnostic) catch |err| {
+                    // An incomplete resolve must not acknowledge these bytes:
+                    // retrying the same valid source must still adopt it.
+                    if (err == error.OutOfMemory) {
+                        slot.observed.invalidate();
+                        continue;
+                    }
                     const hash = hashing.hasher.final();
                     if (self.options.markup_development_policy) |callback| {
                         const program = markup_development.reload(callback, 2, hash != slot.hash, true, err == error.MarkupSyntax or err == error.MarkupImport, false, self.installed);
@@ -4501,6 +4531,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// dev flow runs apps from the app root).
         const DiskImportLoader = struct {
             io: std.Io,
+            observed: ?*markup_watch_cache.Cache = null,
 
             fn loader(self: *DiskImportLoader) canvas.ui_markup.ImportLoader {
                 return .{ .context = @ptrCast(self), .load = load };
@@ -4508,11 +4539,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             fn load(context: *const anyopaque, arena: std.mem.Allocator, path: []const u8) ?[]const u8 {
                 const self: *const DiskImportLoader = @ptrCast(@alignCast(context));
-                return readMarkupFile(self.io, arena, path);
+                const source = readMarkupFile(self.io, arena, path);
+                if (self.observed) |observed| observed.observe(path, source, 1 + canvas.ui_markup.max_imported_files);
+                return source;
             }
         };
 
-        const max_markup_watch_file_bytes = 256 * 1024;
+        const max_markup_watch_file_bytes = markup_watch_cache.max_file_bytes;
 
         fn readMarkupFile(io: std.Io, arena: std.mem.Allocator, path: []const u8) ?[]const u8 {
             var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;

@@ -387,7 +387,12 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                     }
                     const main_label = coordination.equal(policy, view.label, "main");
                     var exists = main_label;
-                    for (self.views[0..self.view_count]) |stored| {
+                    // Pointer iteration: a by-value capture copies the
+                    // whole RuntimeView (inline widget pools included — a
+                    // measured ~7 MiB stack frame), overflowing every thread
+                    // this startup-scene validation can run on. The scan only
+                    // reads three fields.
+                    for (self.views[0..self.view_count]) |*stored| {
                         if (stored.open and stored.window_id == window_id and coordination.equal(policy, stored.label, view.label)) exists = true;
                     }
                     for (self.webviews[0..self.webview_count]) |stored| {

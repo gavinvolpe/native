@@ -38,6 +38,12 @@ const clampCanvasWidgetLayoutTextOffsets = canvas_widget_runtime.clampCanvasWidg
 
 const platformCursorFromCanvas = widget_bridge.platformCursorFromCanvas;
 
+fn canvasWidgetVisibleLocalBounds(layout: canvas.WidgetLayoutTree, index: usize) ?geometry.RectF {
+    const frame = layout.nodes[index].frame.normalized();
+    const visible = canvasWidgetLayoutNodeClippedBounds(layout, index, frame) orelse return null;
+    return geometry.RectF.init(visible.x - frame.x, visible.y - frame.y, visible.width, visible.height);
+}
+
 /// Byte offset of `inner` within `outer` when it is a subslice, else null.
 fn subsliceOffset(outer: []const u8, inner: []const u8) ?usize {
     if (inner.len == 0) return 0;
@@ -219,7 +225,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// `scratch` is reconcile scratch too large for the stack at the
         /// 1024-node budget; callers pass the Runtime's shared
         /// `canvas_widget_copy_scratch` (the event loop is single-threaded).
-        pub fn copyWidgetLayoutTree(self: *RuntimeView, layout: canvas.WidgetLayoutTree, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch) anyerror!void {
+        pub fn copyWidgetLayoutTree(self: *RuntimeView, layout: canvas.WidgetLayoutTree, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch, focused_scroll_source_moved: bool) anyerror!void {
             if (layout.nodes.len > self.widget_layout_nodes.len) return error.WidgetNodeLimitReached;
             var anchored_count: usize = 0;
             for (layout.nodes) |node| {
@@ -314,6 +320,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 }
             }
 
+            const focused_editor_visible_bounds = if (self.canEditCanvasWidgetText(self.canvas_widget_focused_id))
+                canvasWidgetVisibleLocalBounds(self.widgetLayoutTree(), self.canvasWidgetNodeIndexById(self.canvas_widget_focused_id).?)
+            else
+                null;
             // ADOPTION begins here: the pool resets below are
             // destructive, and a later per-node failure (an invalid
             // command name escapes the pre-validation) leaves a TORN
@@ -366,6 +376,47 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // riding it) always reflects the intent machine.
             self.pruneCanvasTooltipIntent();
             self.applyCanvasTooltipVisibility();
+
+            // Reveal only newly clipped editor content. An unchanged rebuild
+            // must preserve a user's deliberate partially visible position.
+            // This is not a new focus arrival or keyboard-tooltip intent.
+            if (focused_editor_visible_bounds) |previously_visible| {
+                if (self.canvasWidgetNodeIndexById(self.canvas_widget_focused_id)) |focused_index| {
+                    const retained = self.widgetLayoutTree();
+                    if (canvasWidgetEditableTextKind(retained.nodes[focused_index].widget.kind) and
+                        canvas_widget_runtime.canvasWidgetLogicalFocusTarget(retained, focused_index) != null)
+                    {
+                        const visible = canvasWidgetVisibleLocalBounds(retained, focused_index);
+                        if (visible == null or !visible.?.containsRect(previously_visible)) {
+                            // A SOURCE-declared offset change is programmatic
+                            // scroll: the request wins by the scroll reconcile
+                            // rule, and the reveal must not read the resulting
+                            // clip as accidental and scroll the editor back.
+                            // The verdict arrives explicitly from the
+                            // reconcile boundary, where the DECLARED values
+                            // still exist — this copy sees only the
+                            // reconciled tree, whose offsets the
+                            // restore/clamp passes have already moved.
+                            if (!focused_scroll_source_moved) {
+                                // Reveal the region that WAS visible, not the
+                                // whole frame: an editor taller than its
+                                // viewport keeps its visible end/caret region
+                                // with the minimum scroll that restores it,
+                                // instead of aligning the full frame to the
+                                // viewport top.
+                                const frame = retained.nodes[focused_index].frame.normalized();
+                                const region = geometry.RectF.init(
+                                    frame.x + previously_visible.x,
+                                    frame.y + previously_visible.y,
+                                    previously_visible.width,
+                                    previously_visible.height,
+                                );
+                                _ = try self.scrollCanvasWidgetRectIntoView(self.canvas_widget_focused_id, region);
+                            }
+                        }
+                    }
+                }
+            }
 
             const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
             canvas_widget_runtime.applyCanvasWidgetSourceScrollSemanticsWithPolicy(self.widget_tokens.widget_continuity_policy, self.widget_semantics_nodes[0..semantics.len], &index_scratch.semantics);

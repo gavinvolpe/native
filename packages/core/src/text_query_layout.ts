@@ -54,9 +54,9 @@ class NscTextQueryContext {
     if (childMode !== 0 && childMode !== 5 && childMode !== 8) this.out.set(this.out.slice(lineAt, lineAt + 56), 832);
     this.w.setUint32(368, this.w.getUint32(368, true) + 1, true); this.w.setUint32(100, 1, true); this.w.setUint32(104, resume, true);
   }
-  nextLine(resume: number, fromPrepared = this.prepared): void {
-    if (fromPrepared) {
-      const at = this.w.getUint32(120, true), count = this.prepared ? this.lineCount : this.w.getUint32(316, true);
+  nextLine(resume: number): void {
+    if (this.prepared) {
+      const at = this.w.getUint32(120, true), count = this.lineCount;
       this.w.setUint32(184, at < count ? 1 : 0, true);
       if (at < count) { this.out.set(this.request.subarray(this.factsEnd + at * 64, this.factsEnd + at * 64 + 56), 128); this.w.setUint32(120, at + 1, true); }
       this.w.setUint32(96, resume, true);
@@ -88,7 +88,7 @@ class NscTextQueryContext {
         if (this.w.getUint32(280, true) === this.w.getUint32(284, true)) return this.done();
       }
       if (this.mode === 1 && this.out[4] === 0) this.startSub(8, 14);
-      else { if (this.mode === 1) this.w.setUint32(88, 1, true); this.w.setUint32(96, 1, true); }
+      else this.w.setUint32(96, this.mode === 1 ? 8 : 1, true);
     }
     while (true) {
       if (this.w.getUint32(100, true) !== 0) {
@@ -101,21 +101,12 @@ class NscTextQueryContext {
       phase = this.w.getUint32(96, true);
       if (phase === 1) { this.nextLine(2); continue; }
       if (phase === 2) {
-        if (this.mode === 0 || this.mode === 1 && this.w.getUint32(88, true) === 1) {
-          if (this.w.getUint32(184, true) === 0) {
-            if (this.mode === 0) return this.done();
-            this.w.setUint32(316, this.w.getUint32(124, true), true); this.w.setUint32(120, 0, true); this.w.setUint32(88, 2, true); this.w.setUint32(272, 0, true); this.w.setUint32(96, 8, true); continue;
-          }
-          const limit = this.mode === 0 ? this.capacity : 64;
-          if (this.w.getUint32(124, true) >= limit) {
-            if (this.mode === 0) { this.w.setUint32(312, 1, true); return this.done(); }
-            // The reference first attempts its 64-line scratch, including
-            // planning the overflowing line, then restarts an uncapped walk.
-            this.w.setUint32(108, 0, true); this.w.setUint32(112, 0, true); this.w.setUint32(116, 0, true); this.w.setUint32(88, 3, true); this.w.setUint32(272, 0, true); this.w.setUint32(96, 8, true); continue;
-          }
-          if (this.mode === 0) this.accumulateBounds(144);
+        if (this.mode === 0) {
+          if (this.w.getUint32(184, true) === 0) return this.done();
+          if (this.w.getUint32(124, true) >= this.capacity) { this.w.setUint32(312, 1, true); return this.done(); }
+          this.accumulateBounds(144);
           const slot = this.w.getUint32(124, true); this.w.setUint32(124, slot + 1, true);
-          return this.action(this.mode === 0 ? 2 : 3, slot, 1);
+          return this.action(2, slot, 1);
         }
         if (this.mode === 2 || this.mode === 5) {
           if (this.w.getUint32(184, true) === 0) { if (this.w.getUint32(188, true) === 0) return this.done(); this.copyLine(128, 192); this.startSub(2, 3, 128, this.w.getUint32(16, true)); continue; }
@@ -155,7 +146,7 @@ class NscTextQueryContext {
         else { this.w.setUint32(320, this.w.getUint32(288, true), true); this.w.setUint32(324, this.w.getUint32(292, true), true); this.out.set(this.out.slice(352, 368), 328); this.w.setUint32(124, slot + 1, true); }
         return this.action(4, slot, 1);
       }
-      if (phase === 8) { this.nextLine(9, this.w.getUint32(88, true) === 2); continue; }
+      if (phase === 8) { this.nextLine(9); continue; }
       if (phase === 9) {
         if (this.w.getUint32(184, true) === 0) {
           if (this.w.getUint32(272, true) === 0) { this.startSub(8, 14); continue; }

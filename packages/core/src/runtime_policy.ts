@@ -386,7 +386,7 @@ function nscvAccessibility(request: Uint8Array): Uint8Array {
   if (request.length < 40 || request[2]! > 1 || request[3]! > 1) throw new Error("invalid accessibility projection header");
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const count = wire.getUint32(4, true), capacity = wire.getUint32(8, true);
-  if (count > 1024 || capacity > 64 || request.length !== 40 + count * 32 || wire.getUint32(12, true) !== 0) throw new Error("invalid accessibility projection table");
+  if (count > 1024 || capacity > 1024 || request.length !== 40 + count * 32 || wire.getUint32(12, true) !== 0) throw new Error("invalid accessibility projection table");
   const length = Math.min(count, capacity), out = new Uint8Array(8 + length * 28), result = new DataView(out.buffer);
   result.setUint32(0, length, true);
   const roles = [0, 1, 2, 4, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 21, 17, 18, 19, 3, 10, 11, 1];
@@ -1859,7 +1859,15 @@ function nscvSemanticTree(request: Uint8Array): Uint8Array {
         while (child < count && depth(child) > depth(i)) {
           if (axis === 0 ? modal(child) || flag(child, 8) && parent(child) === i : modal(child) || flag(child, 8)) { child = skip(child); continue; }
           reach = max(reach, f(f(value(child, axis === 0 ? 56 : 52) + value(child, axis === 0 ? 64 : 60)) + raw));
-          if (axis === 0 ? kind(child) === 14 : kind(child) === 6 || flag(child, 16) || flag(child, 4) || kind(child) === 14 && !flag(child, 128)) child = skip(child); else child++;
+          // A nested clip scope (kind 6 scroll view, flag 16 clip_content,
+          // flag 4 virtualized) bounds its own children on both axes: its
+          // frame is how far it reaches, whatever overflows inside it. The
+          // vertical axis keeps skipping disclosure subtrees wholesale
+          // (kind 14); the horizontal one counts them only while settled
+          // open.
+          if (axis === 0
+            ? kind(child) === 6 || flag(child, 16) || flag(child, 4) || kind(child) === 14
+            : kind(child) === 6 || flag(child, 16) || flag(child, 4) || (kind(child) === 14 && !flag(child, 128))) child = skip(child); else child++;
         }
         content = max(0, f(reach - origin));
       }

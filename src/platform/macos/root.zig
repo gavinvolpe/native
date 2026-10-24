@@ -2166,7 +2166,13 @@ fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform_mod.Widget
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     if (snapshot.nodes.len > platform_mod.max_widget_accessibility_nodes) return error.InvalidViewOptions;
-    var nodes: [platform_mod.max_widget_accessibility_nodes]AppKitWidgetAccessibilityNode = undefined;
+    // The whole supported bounded tree rides in per-call OWNED memory: a
+    // fixed 1024-node platform record on the stack would scale every
+    // publishing frame with the node count (the same per-call-ownership
+    // rule as the runtime's snapshot assembly). The host consumes the
+    // array synchronously, so its lifetime ends with this call.
+    const nodes = try std.heap.c_allocator.alloc(AppKitWidgetAccessibilityNode, snapshot.nodes.len);
+    defer std.heap.c_allocator.free(nodes);
     for (snapshot.nodes, 0..) |node, index| {
         nodes[index] = .{
             .id = node.id,
@@ -2217,7 +2223,7 @@ fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform_mod.Widget
         snapshot.window_id,
         snapshot.view_label.ptr,
         snapshot.view_label.len,
-        nodes[0..snapshot.nodes.len].ptr,
+        nodes.ptr,
         snapshot.nodes.len,
     ) == 0) return error.ViewNotFound;
 }

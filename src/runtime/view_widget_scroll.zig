@@ -418,16 +418,43 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         /// normal routable focus target in the same key event.
         pub fn scrollCanvasWidgetIntoView(self: *RuntimeView, id: canvas.ObjectId) anyerror!?geometry.RectF {
             const target_index = self.canvasWidgetNodeIndexById(id) orelse return null;
+            return scrollCanvasWidgetTargetIntoView(self, target_index, self.widget_layout_nodes[target_index].frame.normalized());
+        }
+
+        /// `scrollCanvasWidgetIntoView` against an explicit target rect: a
+        /// region reveal keeps an editor taller than its viewport on its
+        /// visible end/caret region with the minimum scroll, where the
+        /// full frame cannot fit at all.
+        pub fn scrollCanvasWidgetRectIntoView(self: *RuntimeView, id: canvas.ObjectId, target: geometry.RectF) anyerror!?geometry.RectF {
+            const target_index = self.canvasWidgetNodeIndexById(id) orelse return null;
+            return scrollCanvasWidgetTargetIntoView(self, target_index, target);
+        }
+
+        fn scrollCanvasWidgetTargetIntoView(self: *RuntimeView, target_index: usize, target: geometry.RectF) anyerror!?geometry.RectF {
             // Prove the whole reveal before mutating the first retained
             // offset. A fixed clip outside a runtime scroll can never be
             // repaired by scrolling an outer ancestor; partially applying
             // that attempt used to jump the viewport (and could clear the
             // old focus) before the caller rejected the still-hidden target.
-            if (!canvasWidgetCanScrollIntoView(self, target_index)) return null;
+            if (!canvasWidgetCanScrollIntoView(self, target_index, target)) return null;
             // The target itself is a hoisted window-level surface. Its
             // authored scroll ancestors neither clip nor translate it, so
             // revealing it must not move the content underneath it.
             if (canvas.widgetEscapesAncestorClips(self.widget_layout_nodes[target_index].widget)) return null;
+            // The reveal region travels with the target widget. Scrolling
+            // an inner ancestor TRANSLATES the target's frame
+            // (`applyCanvasWidgetScrollAxis` moves descendants), so a
+            // world-space snapshot goes stale for every outer viewport:
+            // the walk keeps the region as an offset inside the widget and
+            // rebases it against the CURRENT frame before each axis — the
+            // position the scroll policy actually produced (a clamped or
+            // vetoed request moves nothing), matching the dry run's
+            // per-inner-delta translation above.
+            const entry_frame = self.widget_layout_nodes[target_index].frame.normalized();
+            const region_dx = target.x - entry_frame.x;
+            const region_dy = target.y - entry_frame.y;
+            const region_width = target.width;
+            const region_height = target.height;
             var dirty: ?geometry.RectF = null;
             var current = self.widget_layout_nodes[target_index].parent_index;
             while (current) |ancestor_index| {
@@ -442,15 +469,17 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     const viewport = ancestor.frame.inset(ancestor.widget.layout.padding).normalized();
                     if (!viewport.isEmpty()) {
                         if (canvas.widgetScrollsAxis(ancestor.widget, .vertical)) {
-                            const target = self.widget_layout_nodes[target_index].frame.normalized();
-                            const delta_y = canvasWidgetRevealAxisRequestedDelta(.vertical, target, viewport);
+                            const frame = self.widget_layout_nodes[target_index].frame.normalized();
+                            const target_region = geometry.RectF.init(frame.x + region_dx, frame.y + region_dy, region_width, region_height);
+                            const delta_y = canvasWidgetRevealAxisRequestedDelta(.vertical, target_region, viewport);
                             if (delta_y != 0) {
                                 dirty = unionOptionalRects(dirty, try self.applyCanvasWidgetScrollAxis(ancestor_index, .vertical, delta_y, .discrete, false));
                             }
                         }
                         if (canvas.widgetScrollsAxis(ancestor.widget, .horizontal)) {
-                            const target = self.widget_layout_nodes[target_index].frame.normalized();
-                            const delta_x = canvasWidgetRevealAxisRequestedDelta(.horizontal, target, viewport);
+                            const frame = self.widget_layout_nodes[target_index].frame.normalized();
+                            const target_region = geometry.RectF.init(frame.x + region_dx, frame.y + region_dy, region_width, region_height);
+                            const delta_x = canvasWidgetRevealAxisRequestedDelta(.horizontal, target_region, viewport);
                             if (delta_x != 0) {
                                 dirty = unionOptionalRects(dirty, try self.applyCanvasWidgetScrollAxis(ancestor_index, .horizontal, delta_x, .discrete, false));
                             }
@@ -467,7 +496,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         /// focus or retained scroll offsets.
         pub fn canScrollCanvasWidgetIntoView(self: *const RuntimeView, id: canvas.ObjectId) bool {
             const target_index = self.canvasWidgetNodeIndexById(id) orelse return false;
-            return canvasWidgetCanScrollIntoView(self, target_index);
+            return canvasWidgetCanScrollIntoView(self, target_index, self.widget_layout_nodes[target_index].frame.normalized());
         }
 
         /// Dry-run `scrollCanvasWidgetIntoView` against one target frame.
@@ -475,9 +504,9 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         /// tested, exactly like the live walk, but no retained scroll state,
         /// descendant frame, semantics revision, or pending scroll event is
         /// touched until every clip has proved revealable.
-        fn canvasWidgetCanScrollIntoView(self: *const RuntimeView, target_index: usize) bool {
+        fn canvasWidgetCanScrollIntoView(self: *const RuntimeView, target_index: usize, initial_target: geometry.RectF) bool {
             if (target_index >= self.widget_layout_node_count) return false;
-            var target = self.widget_layout_nodes[target_index].frame.normalized();
+            var target = initial_target;
             if (target.isEmpty()) return false;
 
             // A window-level target escapes every ancestor clip at its own

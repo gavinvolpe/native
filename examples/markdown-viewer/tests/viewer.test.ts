@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NativeApp, findWidget } from "@native-sdk/core/testing";
@@ -16,8 +16,9 @@ test("embedded samples preserve the original document bytes", () => {
 });
 
 test("compiled Markdown Viewer keeps complete edited and saved state through replay", async t => {
-  const data = mkdtempSync(join(tmpdir(), "markdown-viewer-test-"));
-  t.after(() => rmSync(data, { recursive: true, force: true }));
+  const temporary = mkdtempSync(join(tmpdir(), "markdown-viewer-test-"));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
+  const data = realpathSync(temporary);
   const old = join(data, "old.md"), next = join(data, "new.md");
   await using app = await NativeApp.start({ width: 1200, height: 760, appDataDirectory: data });
   let snapshot = await app.snapshot();

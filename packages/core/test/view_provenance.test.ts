@@ -4,17 +4,13 @@
 // same attribution.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stripTypeScriptTypes } from "node:module";
 import { runInNewContext } from "node:vm";
 import { compileViewProgram, type ViewContract, type ViewSource } from "../src/view_frontend.ts";
 import { encodeViewProgram } from "../src/view_program.ts";
 import { viewReloadFacade, viewReloadIdentity } from "../src/view_reload.ts";
 import { wyhash } from "../src/wyhash.ts";
 import * as textLibrary from "../sdk/text.ts";
-
-const strip = (source: string) => stripTypeScriptTypes(source, { mode: "transform" })
-  .replace(/^import \{([^}]*)\} from ("[^"]+");$/gm, (_all, names: string, spec: string) => `const {${names.replace(/ as /g, ": ")}} = require(${spec});`)
-  .replace(/^export /gm, "");
+import { transpileViewScript } from "./helpers.ts";
 
 const contract: ViewContract = {
   model: "Model",
@@ -47,7 +43,7 @@ const textOf = (node: Records["nodes"][number]): string => node.textBytes ? Buff
 function views(): { compiled: () => Records; evaluated: () => Records } {
   const { text, program, virtual } = compileViewProgram(app, contract, { sources }, [], undefined, true);
   const identity = viewReloadIdentity(contract, { windows: [], virtual });
-  const source = strip(text) + strip(viewReloadFacade(contract, identity)) +
+  const source = transpileViewScript(text) + transpileViewScript(viewReloadFacade(contract, identity)) +
     "\nglobalThis.native_view = native_view; globalThis.native_dev_view_prepare = native_dev_view_prepare;\n";
   const enc = (value: string) => new TextEncoder().encode(value);
   const context: Record<string, any> = {

@@ -1359,6 +1359,204 @@ test "runtime chains wheel input from saturated nested canvas scroll views" {
     try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[1].velocity_y);
 }
 
+test "runtime bounds an outer canvas scroll range at the nested scroll frame" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-nested-scroll-extent", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 100),
+    });
+
+    // The outer region (viewport 180 x 100) holds a nested scroller at
+    // content y 40 (h 60) whose single row is 500px tall, plus a footer
+    // at y 130 (h 20).
+    const inner_children = [_]canvas.Widget{
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 500), .text = "Tall row" },
+    };
+    const outer_children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .scroll_view,
+            .frame = geometry.RectF.init(0, 40, 0, 60),
+            .children = &inner_children,
+        },
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(0, 130, 0, 20), .text = "Footer" },
+    };
+    const outer = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .children = &outer_children,
+    };
+
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(outer, geometry.RectF.init(0, 0, 180, 100), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // The nested region measures its own 500px content. The outer region
+    // measures the nested VIEWPORT frame (40 + 60 = 100) and the footer
+    // (130 + 20 = 150) instead of the nested row's 540 reach — otherwise
+    // its range would run 440px into blank space past the footer.
+    const inner_state = harness.runtime.views[0].canvasWidgetScrollStateById(2).?;
+    try std.testing.expectEqual(@as(f32, 500), inner_state.content_extent_y);
+    try std.testing.expectEqual(@as(f32, 60), inner_state.viewport_extent_y);
+    try std.testing.expectEqual(@as(f32, 440), inner_state.axis(.vertical).maxOffset());
+    var outer_state = harness.runtime.views[0].canvasWidgetScrollStateById(1).?;
+    try std.testing.expectEqual(@as(f32, 150), outer_state.content_extent_y);
+    try std.testing.expectEqual(@as(f32, 100), outer_state.viewport_extent_y);
+    try std.testing.expectEqual(@as(f32, 50), outer_state.axis(.vertical).maxOffset());
+
+    // The semantics lane (scrollbars, accessibility, automation
+    // snapshots) reports the same range for both regions.
+    const semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    try std.testing.expectEqual(@as(f32, 150), canvasWidgetSemanticsById(semantics, 1).?.scroll.content_extent);
+    try std.testing.expectEqual(@as(f32, 500), canvasWidgetSemanticsById(semantics, 2).?.scroll.content_extent);
+
+    // A wheel over the nested row scrolls the nested region to its own
+    // end, leaving its last row flush with the nested viewport edge.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .scroll,
+        .x = 90,
+        .y = 70,
+        .delta_y = 440,
+    } });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 440), retained.findById(2).?.widget.value);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+    try std.testing.expectEqual(@as(f32, 100), retained.findById(3).?.frame.maxY());
+
+    // Wheeling the same point again hands the surplus to the outer
+    // region, which stops at the footer: the reachable end leaves no
+    // blank region below it.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .scroll,
+        .x = 90,
+        .y = 70,
+        .delta_y = 400,
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 50), retained.findById(1).?.widget.value);
+    try std.testing.expectEqual(@as(f32, 440), retained.findById(2).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, -10, 180, 60), retained.findById(2).?.frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 80, 180, 20), retained.findById(4).?.frame);
+
+    // The range is scroll-invariant: the same content extent before and
+    // after scrolling, so no feedback loop grows it on the next wheel.
+    outer_state = harness.runtime.views[0].canvasWidgetScrollStateById(1).?;
+    try std.testing.expectEqual(@as(f32, 150), outer_state.content_extent_y);
+    try std.testing.expectEqual(@as(f32, 50), outer_state.axis(.vertical).offset);
+    try std.testing.expectEqual(@as(f32, 50), harness.runtime.views[0].canvasWidgetScrollStateById(1).?.axis(.vertical).maxOffset());
+}
+
+test "runtime counts a nested canvas clip scope frame and skips its content" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-nested-clip-extent", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 60),
+    });
+
+    // A 60px-tall outer region holding a nested scroller (frame maxY
+    // 220) and a `clip_content` surface (frame maxY 40), each with a
+    // 500px row that overflows it.
+    const nested_children = [_]canvas.Widget{
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 500), .text = "Nested row" },
+    };
+    const clipped_children = [_]canvas.Widget{
+        .{ .id = 5, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 500), .text = "Clipped row" },
+    };
+    var outer_children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .scroll_view,
+            .frame = geometry.RectF.init(0, 200, 0, 20),
+            .children = &nested_children,
+        },
+        .{
+            .id = 4,
+            .kind = .stack,
+            .frame = geometry.RectF.init(0, 10, 0, 30),
+            .layout = .{ .clip_content = true },
+            .children = &clipped_children,
+        },
+    };
+    const outer = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .children = &outer_children,
+    };
+
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(outer, geometry.RectF.init(0, 0, 180, 60), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // The nested scroller's 500px row (maxY 700) and the clipped
+    // surface's 500px row (maxY 510) reach far past the nested frames;
+    // the outer range follows the frames, not the overflowing content.
+    var outer_state = harness.runtime.views[0].canvasWidgetScrollStateById(1).?;
+    try std.testing.expectEqual(@as(f32, 220), outer_state.content_extent_y);
+    try std.testing.expectEqual(@as(f32, 60), outer_state.viewport_extent_y);
+    try std.testing.expectEqual(@as(f32, 160), outer_state.axis(.vertical).maxOffset());
+    try std.testing.expectEqual(@as(f32, 500), harness.runtime.views[0].canvasWidgetScrollStateById(2).?.content_extent_y);
+    const semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    try std.testing.expectEqual(@as(f32, 220), canvasWidgetSemanticsById(semantics, 1).?.scroll.content_extent);
+
+    // A wheel over the clipped row stops the outer region at its honest
+    // end, with the nested scroller's frame flush with the viewport edge.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .scroll,
+        .x = 90,
+        .y = 20,
+        .delta_y = 400,
+    } });
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 160), retained.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 40, 180, 20), retained.findById(2).?.frame);
+
+    // Swapping the two clip scopes proves the `clip_content` frame is
+    // counted in its own right: its 700px reach is excluded while its
+    // frame bounds the range.
+    outer_children[0].frame = geometry.RectF.init(0, 10, 0, 20);
+    outer_children[1].frame = geometry.RectF.init(0, 200, 0, 20);
+    var swapped_nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const swapped = try canvas.layoutWidgetTree(outer, geometry.RectF.init(0, 0, 180, 60), &swapped_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", swapped);
+    outer_state = harness.runtime.views[0].canvasWidgetScrollStateById(1).?;
+    try std.testing.expectEqual(@as(f32, 220), outer_state.content_extent_y);
+    try std.testing.expectEqual(@as(f32, 160), outer_state.axis(.vertical).maxOffset());
+}
+
 test "runtime leaves virtualized canvas scroll views app driven" {
     const TestApp = struct {
         widget_pointer_count: u32 = 0,

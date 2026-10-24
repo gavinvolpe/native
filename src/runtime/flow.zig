@@ -187,6 +187,23 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         pub fn dispatchPlatformEvent(self: *Runtime, app: App, event_value: platform.Event) anyerror!void {
+            // The caret-blink wake is RUNTIME-OWNED: consume it before the
+            // host-flow program and the session journal (blink edges are
+            // clock-derived, not journaled facts — replay reproduces them
+            // from its own frame timestamps) and never hand it to the app's
+            // event mapping, unlike the press-hold timer which fires an
+            // app-visible Msg. The handler advances due views with one
+            // frame each and re-arms; nothing else sees this event. A wake
+            // error degrades exactly like a dispatched app event —
+            // recorded, never fatal to the host callback — with the same
+            // `.propagate` escape the dispatch loop honors in tests.
+            if (event_value == .timer and event_value.timer.id == platform.caret_blink_timer_id) {
+                self.handleCaretBlinkTimerWake(event_value.timer.timestamp_ns) catch |err| {
+                    recordDispatchError(self, "caret_blink_wake", err);
+                    if (self.dispatch_error_policy == .propagate) return err;
+                };
+                return;
+            }
             const policy = app.host_flow_policy orelse return native_reference.RuntimeFlow(Runtime).dispatchPlatformEvent(self, app, event_value);
             const kind = host_flow.eventKind(event_value);
             const entry = host_flow.plan(policy, .journal_enter, .{ .kind = kind, .a = @intFromBool(self.options.session_recorder != null), .b = @intFromBool(self.invalidated) });

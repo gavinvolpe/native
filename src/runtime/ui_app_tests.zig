@@ -2455,7 +2455,11 @@ test "with imports the compiled view stays the baseline until the watched closur
 const CompiledCounterView = canvas.CompiledMarkupView(CounterModel, CounterMsg, counter_markup);
 
 test "a compiled markup view drives the ui app with the runtime markup engine compiled out" {
-    const LeanApp = ui_app_model.UiAppWithFeatures(CounterModel, CounterMsg, .{ .runtime_markup = false });
+    const LeanApp = ui_app_model.UiAppWithFeatures(CounterModel, CounterMsg, .{
+        .runtime_markup = false,
+        .max_watched_fragments = 24,
+    });
+    try std.testing.expectEqual(@as(usize, 24), LeanApp.max_watched_fragments);
 
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
@@ -2470,7 +2474,9 @@ test "a compiled markup view drives the ui app with the runtime markup engine co
         .update = counterUpdate,
         .view = CompiledCounterView.build,
         .on_command = counterCommand,
+        .fragment_watch = .{ .fragments = &hybrid_counter_fragments, .io = std.testing.io },
     });
+    try std.testing.expect(@TypeOf(app_state.markup_fragment_slots) == void);
     defer app_state.deinit();
     const app = app_state.app();
     try harness.start(app);
@@ -2680,6 +2686,13 @@ test "the fragment watch reloads a compiled fragment embedded in a Zig view" {
     try std.testing.expect(app_state.markup_fragment_slots[0].document == null);
     try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Reset") != null);
 
+    const baseline_resolves = app_state.markup_fragment_slots[0].resolve_attempts;
+    try std.testing.expectEqual(@as(usize, 1), baseline_resolves);
+    for (0..3) |_| {
+        try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 1_750_000).?);
+    }
+    try std.testing.expectEqual(baseline_resolves, app_state.markup_fragment_slots[0].resolve_attempts);
+
     // Advance model state, then edit the fragment's file: the poll
     // reloads THAT fragment through the interpreter and rebuilds while
     // model state and structural ids hold.
@@ -2688,6 +2701,9 @@ test "the fragment watch reloads a compiled fragment embedded in a Zig view" {
     const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, increment_id });
     try harness.runtime.dispatchAutomationCommand(app, click);
     try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    const focus = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} focus", .{ canvas_label, increment_id });
+    try harness.runtime.dispatchAutomationCommand(app, focus);
+    try std.testing.expectEqual(increment_id, harness.runtime.views[0].canvas_widget_focused_id);
 
     try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup_v2 });
     try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_000_000).?);
@@ -2696,6 +2712,7 @@ test "the fragment watch reloads a compiled fragment embedded in a Zig view" {
     try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
     try std.testing.expectEqual(increment_id, findWidgetIdByText(app_state.tree.?, .button, "Increment").?);
+    try std.testing.expectEqual(increment_id, harness.runtime.views[0].canvas_widget_focused_id);
 
     // Reverting the file byte for byte drops the override: back to the
     // comptime-compiled path, the release-identical one.
@@ -2731,6 +2748,13 @@ test "a broken fragment save keeps the last good view and the next good save rec
     try std.testing.expect(app_state.markup_diagnostic != null);
     try std.testing.expect(std.mem.indexOf(u8, app_state.markup_diagnostic.?.path, "ui-app-fragment-actions.native") != null);
 
+    const failed_resolves = app_state.markup_fragment_slots[0].resolve_attempts;
+    for (0..3) |_| {
+        try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 1_750_000).?);
+    }
+    try std.testing.expectEqual(failed_resolves, app_state.markup_fragment_slots[0].resolve_attempts);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+
     // A save that parses but cannot build against the Model (a binding
     // naming no model field — what the compiled engine rejects at
     // comptime): the frame aborts, the last good tree stays up, and the
@@ -2745,6 +2769,327 @@ test "a broken fragment save keeps the last good view and the next good save rec
     try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_500_000).?);
     try std.testing.expect(findWidgetIdByText(app_state.tree.?, .button, "Start over") != null);
     try std.testing.expect(app_state.markup_diagnostic == null);
+}
+
+// The deep-fragment lifecycle guard. An app-sized message union (dozens
+// of arms, several carrying multi-kilobyte records) hot-reloads a
+// realistically deep fragment through the same watch harness: the
+// interpreter rebuild the poll performs must stay stack-bounded, and a
+// failed save must reuse the slot's live document — the two-arena swap
+// — rather than rebuild from nothing.
+
+const DeepRecord = struct {
+    bytes: [6144]u8 = @splat(0),
+    len: usize = 0,
+};
+
+const DeepModel = struct {
+    count: u32 = 0,
+};
+
+const DeepMsg = union(enum) {
+    bump,
+    tag0,
+    tag1,
+    tag2,
+    tag3,
+    tag4,
+    tag5,
+    tag6,
+    tag7,
+    tag8,
+    tag9,
+    tag10,
+    tag11,
+    tag12,
+    tag13,
+    tag14,
+    tag15,
+    tag16,
+    tag17,
+    tag18,
+    tag19,
+    tag20,
+    tag21,
+    tag22,
+    tag23,
+    tag24,
+    tag25,
+    tag26,
+    tag27,
+    tag28,
+    tag29,
+    tag30,
+    tag31,
+    tag32,
+    tag33,
+    tag34,
+    tag35,
+    tag36,
+    tag37,
+    tag38,
+    tag39,
+    tag40,
+    tag41,
+    tag42,
+    tag43,
+    tag44,
+    tag45,
+    tag46,
+    tag47,
+    tag48,
+    tag49,
+    tag50,
+    tag51,
+    tag52,
+    tag53,
+    tag54,
+    tag55,
+    tag56,
+    tag57,
+    tag58,
+    tag59,
+    tag60,
+    tag61,
+    tag62,
+    tag63,
+    name0: []const u8,
+    name1: []const u8,
+    name2: []const u8,
+    name3: []const u8,
+    name4: []const u8,
+    name5: []const u8,
+    name6: []const u8,
+    name7: []const u8,
+    bulk0: DeepRecord,
+    bulk1: DeepRecord,
+    bulk2: DeepRecord,
+    bulk3: DeepRecord,
+    bulk4: DeepRecord,
+    bulk5: DeepRecord,
+};
+
+const DeepApp = ui_app_model.UiApp(DeepModel, DeepMsg);
+
+fn deepUpdate(model: *DeepModel, msg: DeepMsg) void {
+    switch (msg) {
+        .bump => model.count += 1,
+        else => {},
+    }
+}
+
+const deep_fragment_baseline =
+    \\<column gap="4">
+    \\  <text>Baseline</text>
+    \\</column>
+;
+
+const DeepBaselineView = canvas.CompiledMarkupView(DeepModel, DeepMsg, deep_fragment_baseline);
+
+fn deepHybridView(ui: *DeepApp.Ui, model: *const DeepModel) DeepApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        DeepBaselineView.build(ui, model),
+    });
+}
+
+const deep_fragment_path = ".zig-cache/ui-app-deep-fragment.native";
+
+const deep_counter_fragments = [_]canvas.MarkupFragment{
+    DeepBaselineView.fragment(deep_fragment_path),
+};
+
+fn deepCounterOptions(io: std.Io) DeepApp.Options {
+    var options: DeepApp.Options = .{
+        .name = "ui-app-deep-counter",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = deepUpdate,
+        .view = deepHybridView,
+    };
+    options.fragment_watch = .{ .fragments = &deep_counter_fragments, .io = io };
+    return options;
+}
+
+const deep_fragment_markup =
+    \\<column gap="2">
+    \\  <text>Count {count}</text>
+    \\  <button on-press="bump">Bump</button>
+    \\  <column gap="2">
+    \\    <text>Level 1</text>
+    \\    <column gap="2">
+    \\      <text>Level 2</text>
+    \\      <column gap="2">
+    \\        <text>Level 3</text>
+    \\        <column gap="2">
+    \\          <text>Level 4</text>
+    \\          <column gap="2">
+    \\            <text>Level 5</text>
+    \\            <column gap="2">
+    \\              <text>Level 6</text>
+    \\              <column gap="2">
+    \\                <text>Level 7</text>
+    \\                <column gap="2">
+    \\                  <text>Level 8</text>
+    \\                  <column gap="2">
+    \\                    <text>Level 9</text>
+    \\                    <column gap="2">
+    \\                      <text>Level 10</text>
+    \\                      <column gap="2">
+    \\                        <text>Level 11</text>
+    \\                        <column gap="2">
+    \\                          <text>Level 12</text>
+    \\                          <column gap="2">
+    \\                            <text>Level 13</text>
+    \\                            <column gap="2">
+    \\                              <text>Level 14</text>
+    \\                              <column gap="2">
+    \\                                <text>Level 15</text>
+    \\                                <column gap="2">
+    \\                                  <text>Level 16</text>
+    \\                                  <column gap="2">
+    \\                                    <text>Level 17</text>
+    \\                                    <column gap="2">
+    \\                                      <text>Level 18</text>
+    \\                                      <column gap="2">
+    \\                                        <text>Level 19</text>
+    \\                                        <column gap="2">
+    \\                                          <text>Level 20</text>
+    \\                                          <column gap="2">
+    \\                                            <text>Level 21</text>
+    \\                                            <column gap="2">
+    \\                                              <text>Level 22</text>
+    \\                                              <column gap="2">
+    \\                                                <text>Level 23</text>
+    \\                                                <text>Deep leaf one</text>
+    \\                                              </column>
+    \\                                            </column>
+    \\                                          </column>
+    \\                                        </column>
+    \\                                      </column>
+    \\                                    </column>
+    \\                                  </column>
+    \\                                </column>
+    \\                              </column>
+    \\                            </column>
+    \\                          </column>
+    \\                        </column>
+    \\                      </column>
+    \\                    </column>
+    \\                  </column>
+    \\                </column>
+    \\              </column>
+    \\            </column>
+    \\          </column>
+    \\        </column>
+    \\      </column>
+    \\    </column>
+    \\  </column>
+    \\</column>
+;
+
+test "a broken deep-fragment save keeps the last good reloaded view and the next good save recovers" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = deep_fragment_baseline });
+    defer cwd.deleteFile(io, deep_fragment_path) catch {};
+
+    // The union this app carries is app-sized: dozens of arms, several
+    // multi-kilobyte — a single message value is over 6 KiB and gets
+    // copied through every builder the reload runs. The interpreter's
+    // per-element frames must not scale with it.
+    try std.testing.expect(@sizeOf(DeepMsg) > 6144);
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(DeepApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = DeepApp.init(std.heap.page_allocator, .{}, deepCounterOptions(io));
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+    try std.testing.expect(app_state.installed);
+
+    // Boot renders the compiled baseline and arms the watch.
+    try std.testing.expect(harness.null_platform.startedTimer(DeepApp.markup_watch_timer_id) != null);
+    try std.testing.expect(harness.runtime.markup_watch_armed);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Baseline") != null);
+
+    // An idle poll (file matches the embedded baseline) keeps the
+    // comptime-compiled path: no override document is adopted.
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 1_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document == null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Baseline") != null);
+
+    // Save the deep fragment: the poll adopts it through the
+    // interpreter — the same bounded rebuild a hot reload performs.
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = deep_fragment_markup });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 2_000_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Baseline") == null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Level 12") != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf one") != null);
+
+    // Model state rides through the reloaded interpreter view.
+    const bump_id = findWidgetIdByText(app_state.tree.?, .button, "Bump").?;
+    var command_buffer: [96]u8 = undefined;
+    const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, bump_id });
+    try harness.runtime.dispatchAutomationCommand(app, click);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+
+    // A save that does not parse: the slot keeps its live document (the
+    // two-arena swap), so the deep reloaded view stays up, and the
+    // teaching diagnostic names the file.
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = "<column><oops</column>" });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 2_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf one") != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Level 12") != null);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_state.markup_diagnostic.?.path, "ui-app-deep-fragment.native") != null);
+
+    // A save that parses but cannot build against the Model (a binding
+    // naming no model field) keeps the same reloaded view: the frame
+    // aborts, the live document survives, the diagnostic reports.
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = "<column><text>{missing_field}</text></column>" });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 3_000_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf one") != null);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+
+    // The next good save recovers in place: still the interpreter, the
+    // deep tree rebuilt again, model state and structural ids held.
+    const deep_markup_v2 = try std.mem.replaceOwned(u8, std.testing.allocator, deep_fragment_markup, "Deep leaf one", "Deep leaf two");
+    defer std.testing.allocator.free(deep_markup_v2);
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = deep_markup_v2 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 3_500_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf two") != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf one") == null);
+    try std.testing.expect(app_state.markup_diagnostic == null);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+    try std.testing.expectEqual(bump_id, findWidgetIdByText(app_state.tree.?, .button, "Bump").?);
+
+    // One more broken save keeps the RELOADED tree — the retained state
+    // is the live-reload document, not a rebuild from the baseline.
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = "<column><oops</column>" });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 4_000_000).?);
+    try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf two") != null);
+    try std.testing.expect(app_state.markup_diagnostic != null);
+
+    // And the final good save recovers again, still holding state.
+    const deep_markup_v3 = try std.mem.replaceOwned(u8, std.testing.allocator, deep_fragment_markup, "Deep leaf one", "Deep leaf three");
+    defer std.testing.allocator.free(deep_markup_v3);
+    try cwd.writeFile(io, .{ .sub_path = deep_fragment_path, .data = deep_markup_v3 });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(DeepApp.markup_watch_timer_id, 4_500_000).?);
+    try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Deep leaf three") != null);
+    try std.testing.expect(app_state.markup_diagnostic == null);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.count);
+    try std.testing.expectEqual(bump_id, findWidgetIdByText(app_state.tree.?, .button, "Bump").?);
 }
 
 // Two fragments importing ONE shared component file: the import-closure
@@ -2866,6 +3211,308 @@ test "editing a shared imported file reloads every fragment whose imports reach 
     try std.testing.expect(app_state.markup_fragment_slots[0].document != null);
     try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Badge A") != null);
     try std.testing.expect(findWidgetIdByText(app_state.tree.?, .text, "Badge B") != null);
+}
+
+// Every entry is a different compiled document, not repeated registrations
+// of one key: roots beyond the default capacity must obtain their own overrides.
+const capacity_fragment_count = 21;
+
+fn capacityFragmentMarkup(comptime index: usize, comptime edited: bool) []const u8 {
+    return std.fmt.comptimePrint("<text>Root {d} {s}</text>", .{ index, if (edited) "after" else "before" });
+}
+
+fn CapacityFragmentView(comptime index: usize) type {
+    return canvas.CompiledMarkupView(CounterModel, CounterMsg, capacityFragmentMarkup(index, false));
+}
+
+fn capacityFragmentsView(ui: *CounterApp.Ui, model: *const CounterModel) CounterApp.Ui.Node {
+    const nodes = ui.arena.alloc(CounterApp.Ui.Node, capacity_fragment_count) catch @panic("fixture allocation");
+    inline for (0..capacity_fragment_count) |index| {
+        nodes[index] = CapacityFragmentView(index).build(ui, model);
+    }
+    return ui.column(.{ .gap = 0 }, nodes);
+}
+
+fn exerciseFragmentCapacity(comptime AppT: type, comptime expected_watched: usize) !void {
+    // This fixture instantiates 21 independent compiled documents in one test.
+    @setEvalBranchQuota(100_000);
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var fragments: [capacity_fragment_count]canvas.MarkupFragment = undefined;
+    var owned_paths: [capacity_fragment_count][:0]u8 = undefined;
+    var paths_owned: usize = 0;
+    defer for (owned_paths[0..paths_owned]) |path| std.testing.allocator.free(path);
+    inline for (0..capacity_fragment_count) |index| {
+        const name = std.fmt.comptimePrint("root-{d}.native", .{index});
+        try temporary.dir.writeFile(io, .{ .sub_path = name, .data = capacityFragmentMarkup(index, false) });
+        fragments[index] = CapacityFragmentView(index).fragment(name);
+        owned_paths[index] = try temporary.dir.realPathFileAlloc(io, name, std.testing.allocator);
+        fragments[index].path = owned_paths[index];
+        paths_owned += 1;
+    }
+    // Key identity matters to lookup, independently of the filesystem paths.
+    for (fragments, 0..) |fragment, index| {
+        try std.testing.expect(fragment.key != null);
+        for (fragments[index + 1 ..]) |other| try std.testing.expect(fragment.key != other.key);
+    }
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    // Leak-check the app, every active cache, both reload arenas and spare
+    // initialized slots. App.create avoids an app-sized test stack frame.
+    const state = try AppT.create(std.testing.allocator, .{
+        .name = "fragment-capacity",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = counterUpdate,
+        .view = capacityFragmentsView,
+        .fragment_watch = .{ .fragments = &fragments, .io = io },
+    });
+    defer state.destroy();
+    state.model.count = 7;
+    const app = state.app();
+    try installCounterApp(harness, app);
+    try std.testing.expectEqual(AppT.max_watched_fragments, state.markup_fragment_slots.len);
+    try std.testing.expect(harness.runtime.markup_watch_armed);
+    try pollCounterFragments(harness, app);
+    for (state.markup_fragment_slots, 0..) |slot, index| {
+        try std.testing.expectEqual(@as(usize, if (index < expected_watched) 1 else 0), slot.resolve_attempts);
+        try std.testing.expect(slot.document == null);
+    }
+    // Editing ALL roots proves adding five new roots does not sacrifice the
+    // original sixteen, and default overflow does not overwrite earlier slots.
+    inline for (0..capacity_fragment_count) |index| {
+        try temporary.dir.writeFile(io, .{
+            .sub_path = std.fmt.comptimePrint("root-{d}.native", .{index}),
+            .data = capacityFragmentMarkup(index, true),
+        });
+    }
+    try pollCounterFragments(harness, app);
+    inline for (0..capacity_fragment_count) |index| {
+        const wanted = std.fmt.comptimePrint("Root {d} {s}", .{ index, if (index < expected_watched) "after" else "before" });
+        try std.testing.expectEqual(@as(usize, 1), countTextIn(state.tree.?.root, wanted));
+        if (index < expected_watched) try std.testing.expect(state.markup_fragment_slots[index].document != null);
+    }
+    try std.testing.expectEqual(@as(u32, 7), state.model.count);
+    try pollCounterFragments(harness, app);
+    for (state.markup_fragment_slots, 0..) |slot, index| {
+        try std.testing.expectEqual(@as(usize, if (index < expected_watched) 2 else 0), slot.resolve_attempts);
+    }
+    // All watched identities return to their independent compiled baselines.
+    inline for (0..capacity_fragment_count) |index| {
+        try temporary.dir.writeFile(io, .{
+            .sub_path = std.fmt.comptimePrint("root-{d}.native", .{index}),
+            .data = capacityFragmentMarkup(index, false),
+        });
+    }
+    try pollCounterFragments(harness, app);
+    inline for (0..capacity_fragment_count) |index| {
+        const wanted = std.fmt.comptimePrint("Root {d} before", .{index});
+        try std.testing.expectEqual(@as(usize, 1), countTextIn(state.tree.?.root, wanted));
+    }
+    for (state.markup_fragment_slots, 0..) |slot, index| {
+        try std.testing.expect(slot.document == null);
+        try std.testing.expectEqual(@as(usize, if (index < expected_watched) 3 else 0), slot.resolve_attempts);
+    }
+}
+
+test "per-app fragment capacity watches every distinct root beyond the default budget" {
+    const ExpandedApp = ui_app_model.UiAppWithFeatures(CounterModel, CounterMsg, .{ .max_watched_fragments = 24 });
+    try std.testing.expectEqual(@as(usize, 24), ExpandedApp.max_watched_fragments);
+    try exerciseFragmentCapacity(ExpandedApp, capacity_fragment_count);
+}
+
+test "default fragment capacity keeps overflow compiled and retains its first sixteen roots" {
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+    try std.testing.expectEqual(@as(usize, 16), CounterApp.max_watched_fragments);
+    try exerciseFragmentCapacity(CounterApp, 16);
+}
+
+test "fragment watch detects preserved timestamps atomic saves and root recreation" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup });
+    defer cwd.deleteFile(io, fragment_actions_path) catch {};
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const state = try CounterApp.create(std.heap.page_allocator, hybridCounterOptions(io));
+    defer state.destroy();
+    const app = state.app();
+    try installCounterApp(harness, app);
+    try pollCounterFragments(harness, app);
+
+    const original = blk: {
+        const file = try cwd.openFile(io, fragment_actions_path, .{ .mode = .read_write });
+        defer file.close(io);
+        break :blk try file.stat(io);
+    };
+    const edited = try std.testing.allocator.dupe(u8, fragment_actions_markup);
+    defer std.testing.allocator.free(edited);
+    const label = std.mem.indexOf(u8, edited, "Reset").?;
+    @memcpy(edited[label..][0..5], "Again");
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = edited });
+    const updated = blk: {
+        const replaced = try cwd.openFile(io, fragment_actions_path, .{ .mode = .read_write });
+        defer replaced.close(io);
+        try replaced.setTimestamps(io, .{ .modify_timestamp = .{ .new = original.mtime } });
+        break :blk try replaced.stat(io);
+    };
+    try std.testing.expectEqual(original.size, updated.size);
+    try std.testing.expectEqual(original.mtime.nanoseconds, updated.mtime.nanoseconds);
+    state.model.count = 7;
+    try pollCounterFragments(harness, app);
+    try std.testing.expect(findWidgetIdByText(state.tree.?, .button, "Again") != null);
+    try std.testing.expectEqual(@as(u32, 7), state.model.count);
+
+    var atomic = try cwd.createFileAtomic(io, fragment_actions_path, .{ .replace = true });
+    defer atomic.deinit(io);
+    try atomic.file.writePositionalAll(io, fragment_actions_markup_v2, 0);
+    try atomic.replace(io);
+    try pollCounterFragments(harness, app);
+    try std.testing.expect(findWidgetIdByText(state.tree.?, .button, "Start over") != null);
+
+    try cwd.deleteFile(io, fragment_actions_path);
+    try pollCounterFragments(harness, app);
+    try std.testing.expect(findWidgetIdByText(state.tree.?, .button, "Start over") != null);
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup });
+    try pollCounterFragments(harness, app);
+    try std.testing.expect(state.markup_fragment_slots[0].document == null);
+    try std.testing.expect(findWidgetIdByText(state.tree.?, .button, "Reset") != null);
+    try std.testing.expectEqual(@as(u32, 7), state.model.count);
+}
+
+test "fragment resolver allocation failure retries unchanged valid bytes without acknowledging the hash" {
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const name = "actions.native";
+    try temporary.dir.writeFile(io, .{ .sub_path = name, .data = fragment_actions_markup });
+    const path = try temporary.dir.realPathFileAlloc(io, name, std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var fragments = [_]canvas.MarkupFragment{FragmentActionsView.fragment("actions.native")};
+    fragments[0].path = path;
+
+    for ([_]bool{ false, true }) |with_policy| {
+        try temporary.dir.writeFile(io, .{ .sub_path = name, .data = fragment_actions_markup });
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var options = hybridCounterOptions(io);
+        options.fragment_watch = .{ .fragments = &fragments, .io = io };
+        const state = try CounterApp.create(std.heap.page_allocator, options);
+        defer state.destroy();
+        const app = state.app();
+        try installCounterApp(harness, app);
+        try pollCounterFragments(harness, app);
+        const slot = &state.markup_fragment_slots[0];
+        const good_hash = slot.hash;
+        const attempts = slot.resolve_attempts;
+
+        try temporary.dir.writeFile(io, .{ .sub_path = name, .data = fragment_actions_markup_v2 });
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        slot.resolve_allocator_for_test = failing.allocator();
+        // An OOM must bypass the policy's failure/observed-hash program as
+        // well as the reference branch. Only the final no-rebuild query is legal.
+        if (with_policy) state.options.markup_development_policy = noReloadOnOomPolicy;
+        try pollCounterFragments(harness, app);
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(attempts + 1, slot.resolve_attempts);
+        try std.testing.expectEqual(good_hash, slot.hash);
+        try std.testing.expect(!slot.observed.complete);
+        try std.testing.expect(slot.document == null);
+        try std.testing.expect(findWidgetIdByText(state.tree.?, .button, "Reset") != null);
+
+        // Restore allocation without saving the source a second time.
+        slot.resolve_allocator_for_test = null;
+        state.options.markup_development_policy = null;
+        try pollCounterFragments(harness, app);
+        try std.testing.expectEqual(attempts + 2, slot.resolve_attempts);
+        try std.testing.expect(slot.hash != good_hash);
+        try std.testing.expect(slot.document != null);
+        try std.testing.expect(findWidgetIdByText(state.tree.?, .button, "Start over") != null);
+        try pollCounterFragments(harness, app);
+        try std.testing.expectEqual(attempts + 2, slot.resolve_attempts);
+    }
+}
+
+fn noReloadOnOomPolicy(input: []const u8, output: []u8) usize {
+    std.debug.assert(input.len == 6 and input[2] == 11 and input[4] == 0);
+    @memset(output[0..4], 0);
+    return 4;
+}
+
+fn pollCounterFragments(harness: anytype, app: core.App) !void {
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 3_000_000).?);
+}
+
+test "fragment watch follows nested missing dependencies and forgets removed imports" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const leaf_path = ".zig-cache/ui-app-fragment-leaf.native";
+    const nested = "<import src=\"ui-app-fragment-leaf.native\"/>";
+    try cwd.writeFile(io, .{ .sub_path = fragment_badge_a_path, .data = fragment_badge_a_markup });
+    defer cwd.deleteFile(io, fragment_badge_a_path) catch {};
+    try cwd.writeFile(io, .{ .sub_path = fragment_badge_b_path, .data = fragment_badge_b_markup });
+    defer cwd.deleteFile(io, fragment_badge_b_path) catch {};
+    try cwd.writeFile(io, .{ .sub_path = fragment_parts_path, .data = fragment_parts_markup });
+    defer cwd.deleteFile(io, fragment_parts_path) catch {};
+    cwd.deleteFile(io, leaf_path) catch {};
+    defer cwd.deleteFile(io, leaf_path) catch {};
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var options = counterOptions();
+    options.view = badgesCounterView;
+    options.fragment_watch = .{ .fragments = &badges_counter_fragments, .io = io };
+    const state = try CounterApp.create(std.heap.page_allocator, options);
+    defer state.destroy();
+    const app = state.app();
+    try installCounterApp(harness, app);
+    try pollCounterFragments(harness, app);
+
+    // Both roots now reach a missing transitive leaf. The old tree survives.
+    try cwd.writeFile(io, .{ .sub_path = fragment_parts_path, .data = nested });
+    try pollCounterFragments(harness, app);
+    try std.testing.expect(state.markup_diagnostic != null);
+    try std.testing.expectEqual(@as(usize, 2), countTextIn(state.tree.?.root, "Alpha"));
+    const failed_resolves = state.markup_fragment_slots[0].resolve_attempts;
+    try pollCounterFragments(harness, app);
+    try std.testing.expectEqual(failed_resolves, state.markup_fragment_slots[0].resolve_attempts);
+
+    // Only create the leaf; neither root nor the intermediate import changes.
+    try cwd.writeFile(io, .{ .sub_path = leaf_path, .data = fragment_parts_markup_v2 });
+    try pollCounterFragments(harness, app);
+    try std.testing.expect(state.markup_diagnostic == null);
+    try std.testing.expectEqual(@as(usize, 2), countTextIn(state.tree.?.root, "Beta"));
+    try cwd.writeFile(io, .{ .sub_path = leaf_path, .data = fragment_parts_markup });
+    try pollCounterFragments(harness, app);
+    try std.testing.expectEqual(@as(usize, 2), countTextIn(state.tree.?.root, "Alpha"));
+
+    try cwd.deleteFile(io, leaf_path);
+    try pollCounterFragments(harness, app);
+    try std.testing.expect(state.markup_diagnostic != null);
+    try std.testing.expectEqual(@as(usize, 2), countTextIn(state.tree.?.root, "Alpha"));
+    try cwd.writeFile(io, .{ .sub_path = leaf_path, .data = fragment_parts_markup_v2 });
+    try pollCounterFragments(harness, app);
+    try std.testing.expectEqual(@as(usize, 2), countTextIn(state.tree.?.root, "Beta"));
+
+    // Removing the nested import restores the compiled baseline. An edit to
+    // the now-unreachable leaf must not invoke either fragment's resolver.
+    try cwd.writeFile(io, .{ .sub_path = fragment_parts_path, .data = fragment_parts_markup });
+    try pollCounterFragments(harness, app);
+    const a_resolves = state.markup_fragment_slots[0].resolve_attempts;
+    const b_resolves = state.markup_fragment_slots[1].resolve_attempts;
+    try std.testing.expect(state.markup_fragment_slots[0].document == null);
+    try std.testing.expect(state.markup_fragment_slots[1].document == null);
+    try cwd.writeFile(io, .{ .sub_path = leaf_path, .data = "<broken" });
+    try pollCounterFragments(harness, app);
+    try std.testing.expectEqual(a_resolves, state.markup_fragment_slots[0].resolve_attempts);
+    try std.testing.expectEqual(b_resolves, state.markup_fragment_slots[1].resolve_attempts);
+    try std.testing.expect(state.markup_diagnostic == null);
 }
 
 test "a hybrid app with no registered fragments keeps the markup watch off" {

@@ -14,7 +14,6 @@ const Error = canvas.Error;
 const FontId = canvas.FontId;
 const DisplayList = canvas.DisplayList;
 const Glyph = text_atlas.Glyph;
-const max_text_bounds_layout_lines: usize = 64;
 
 pub const DrawText = text_layout_types.DrawText;
 pub const TextWrap = text_layout_types.TextWrap;
@@ -448,15 +447,9 @@ pub fn textBounds(value: DrawText) ?geometry.RectF {
     const run_options = textLayoutOptionsForDrawText(.{}, value);
     if (run_options.text_run_policy) |policy| return compiled_query.execute(policy, value, run_options, .{ .mode = 1 }).bounds;
     if (value.text_layout) |options| {
-        var lines: [max_text_bounds_layout_lines]TextLine = undefined;
-        if (layoutTextRun(value, options, &lines)) |layout| {
-            return textBoundsForLines(value, layout.lines);
-        } else |_| {}
-
-        // Bounds must remain truthful even when the fixed layout scratch
-        // cannot materialize every line. Stream the same iterator used by
-        // caret and selection queries; this keeps long wrapped paragraphs
-        // from falling back to a metric box that can clip host-shaped ink.
+        // Bounds need ink geometry, not a materialized layout or its cache
+        // key. Stream each line once, including runs beyond layout scratch
+        // capacity, using the same iterator as caret and selection queries.
         const effective_options = textLayoutOptionsForDrawText(options, value);
         var iterator = TextLineIterator.init(value, effective_options);
         var bounds: ?geometry.RectF = null;
@@ -1270,4 +1263,187 @@ fn unionOptionalBounds(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
 }
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
+}
+
+const BoundsMeasureTestContext = struct {
+    width_calls: usize = 0,
+    advance_calls: usize = 0,
+    ink_calls: usize = 0,
+    multiplier: f32 = 1,
+    reject_ink: bool = false,
+
+    fn width(context: ?*anyopaque, font_id: FontId, size: f32, bytes: []const u8) f32 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.width_calls += 1;
+        return estimateTextWidthForFont(font_id, bytes, size) * self.multiplier;
+    }
+
+    fn advances(context: ?*anyopaque, font_id: FontId, size: f32, bytes: []const u8, output: []f32) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.advance_calls += 1;
+        var index: usize = 0;
+        while (index < bytes.len) {
+            const next = @min(bytes.len, index + utf8SequenceLength(bytes[index]));
+            output[index] = estimateTextAdvanceForBytes(font_id, bytes[index..next], size) * self.multiplier;
+            @memset(output[index + 1 .. next], 0);
+            index = next;
+        }
+        return true;
+    }
+
+    fn ink(context: ?*anyopaque, _: FontId, size: f32, bytes: []const u8, metrics: *TextInkMetrics) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.ink_calls += 1;
+        if (self.reject_ink) return false;
+        // Deliberate left overhang, ascender and descender ink, including
+        // the separately painted ellipsis marker.
+        metrics.* = .{
+            .min_x = -3,
+            .max_x = @as(f32, @floatFromInt(bytes.len)) * @max(size, 0) + 2,
+            .min_y = -5,
+            .max_y = @max(size, 0) + 7,
+        };
+        return true;
+    }
+};
+
+fn expectBufferedTextBoundsForTest(text: DrawText) !void {
+    var lines: [256]TextLine = undefined;
+    const layout = try layoutTextRun(text, text.text_layout.?, &lines);
+    const expected = textBoundsForLines(text, layout.lines);
+    try std.testing.expectEqualDeep(expected, textBounds(text));
+}
+
+test "streamed text bounds match buffered ink geometry across layout styles" {
+    var inherited_context: BoundsMeasureTestContext = .{};
+    const inherited = TextMeasureProvider{ .context = &inherited_context, .measure_fn = BoundsMeasureTestContext.width, .measure_ink_fn = BoundsMeasureTestContext.ink };
+    var override_context: BoundsMeasureTestContext = .{ .multiplier = 1.5 };
+    const override = TextMeasureProvider{ .context = &override_context, .measure_fn = BoundsMeasureTestContext.width, .measure_ink_fn = BoundsMeasureTestContext.ink };
+    const contents = [_][]const u8{ "", "A", "\n", "A\n\n B\n", "  alpha beta  gamma", "é e\xcc\x81 😀 →" };
+    const options = [_]TextLayoutOptions{
+        .{},
+        .{ .max_width = 24, .line_height = 17, .wrap = .word, .alignment = .center },
+        .{ .max_width = 9, .line_height = 15, .wrap = .character, .alignment = .end },
+        .{ .max_width = 24, .wrap = .none, .overflow = .clip },
+        .{ .max_width = 24, .wrap = .none, .overflow = .ellipsis, .alignment = .center },
+        .{ .max_width = 0.1, .wrap = .none, .overflow = .ellipsis, .alignment = .end },
+        .{ .max_width = -1, .line_height = -1, .alignment = .end },
+    };
+    for (contents) |content| {
+        for (options) |layout_options| {
+            for ([_]FontId{ canvas.default_sans_font_id, canvas.default_mono_font_id, 991 }) |font_id| {
+                for ([_]f32{ 0, 10, 23 }) |size| {
+                    var text = DrawText{
+                        .font_id = font_id,
+                        .size = size,
+                        .origin = geometry.PointF.init(-7, 19),
+                        .color = canvas.Color.rgb8(42, 100, 230),
+                        .text = content,
+                        .text_layout = layout_options,
+                    };
+                    try expectBufferedTextBoundsForTest(text);
+                    text.measure = &inherited;
+                    try expectBufferedTextBoundsForTest(text);
+                    text.text_layout.?.measure = &override;
+                    try expectBufferedTextBoundsForTest(text);
+                    override_context.reject_ink = true;
+                    try expectBufferedTextBoundsForTest(text);
+                    override_context.reject_ink = false;
+                }
+            }
+        }
+    }
+}
+
+test "streamed text bounds preserve shaped offsets and break-only runs" {
+    const glyphs = [_]Glyph{
+        .{ .id = 1, .font_id = 91, .x = -2, .y = -3, .advance = 7, .text_start = 0, .text_len = 1 },
+        .{ .id = 2, .font_id = 92, .x = 7, .y = 4, .advance = 5, .text_start = 1, .text_len = 1 },
+        .{ .id = 3, .font_id = 91, .x = 12, .y = -1, .advance = 9, .text_start = 2, .text_len = 1 },
+    };
+    for ([_]TextWrap{ .none, .word, .character }) |wrap| {
+        for ([_]TextAlign{ .start, .center, .end }) |alignment| {
+            for ([_]TextOverflow{ .clip, .ellipsis }) |overflow| {
+                var text = DrawText{
+                    .font_id = 1,
+                    .size = 12,
+                    .origin = geometry.PointF.init(3, 20),
+                    .color = canvas.Color.rgb8(0, 0, 0),
+                    .text = "ABC",
+                    .glyphs = &glyphs,
+                    .text_layout = .{ .max_width = 11, .line_height = 18, .wrap = wrap, .alignment = alignment, .overflow = overflow },
+                };
+                try expectBufferedTextBoundsForTest(text);
+                text.text = "   ";
+                try expectBufferedTextBoundsForTest(text);
+                text.text = "\n\n\n";
+                try expectBufferedTextBoundsForTest(text);
+            }
+        }
+    }
+}
+
+test "streamed text bounds measure capacity boundary and long runs only once" {
+    inline for ([_]usize{ 64, 65, 129 }) |line_count| {
+        var context: BoundsMeasureTestContext = .{};
+        const provider = TextMeasureProvider{ .context = &context, .measure_fn = BoundsMeasureTestContext.width, .measure_ink_fn = BoundsMeasureTestContext.ink };
+        const text = DrawText{
+            .font_id = 991,
+            .size = 12,
+            .origin = geometry.PointF.init(0, 12),
+            .color = canvas.Color.rgb8(0, 0, 0),
+            .text = "W\n" ** (line_count - 1) ++ "W",
+            .measure = &provider,
+            .text_layout = .{ .wrap = .none, .line_height = 15 },
+        };
+        var lines: [256]TextLine = undefined;
+        const layout = try layoutTextRun(text, text.text_layout.?, &lines);
+        try std.testing.expectEqual(line_count, layout.lineCount());
+        const expected = textBoundsForLines(text, layout.lines);
+        const single_pass_width_calls = context.width_calls;
+        const single_pass_ink_calls = context.ink_calls;
+        try std.testing.expect(single_pass_width_calls > 0);
+        try std.testing.expectEqual(line_count, single_pass_ink_calls);
+        context.width_calls = 0;
+        context.ink_calls = 0;
+        try std.testing.expectEqualDeep(expected, textBounds(text));
+        try std.testing.expectEqual(single_pass_width_calls, context.width_calls);
+        try std.testing.expectEqual(single_pass_ink_calls, context.ink_calls);
+    }
+}
+
+test "streamed text bounds match buffered geometry with cold and warm batched advances" {
+    var context: BoundsMeasureTestContext = .{};
+    const provider = TextMeasureProvider{
+        .context = &context,
+        .measure_fn = BoundsMeasureTestContext.width,
+        .measure_advances_fn = BoundsMeasureTestContext.advances,
+        .measure_ink_fn = BoundsMeasureTestContext.ink,
+    };
+    defer text_measure_cache.bumpTextMeasureGeneration();
+    for ([_][]const u8{ "alpha beta gamma", "é e\xcc\x81 😀 →" }) |content| {
+        for ([_]TextWrap{ .word, .character, .none }) |wrap| {
+            const text = DrawText{
+                .font_id = canvas.default_sans_font_id,
+                .size = 12,
+                .origin = geometry.PointF.init(-3, 17),
+                .color = canvas.Color.rgb8(0, 0, 0),
+                .text = content,
+                .measure = &provider,
+                .text_layout = .{ .max_width = 24, .line_height = 17, .wrap = wrap, .alignment = .center, .overflow = .ellipsis },
+            };
+            text_measure_cache.bumpTextMeasureGeneration();
+            var lines: [64]TextLine = undefined;
+            const layout = try layoutTextRun(text, text.text_layout.?, &lines);
+            const expected = textBoundsForLines(text, layout.lines);
+            // The buffered oracle must not prewarm the candidate's advances.
+            text_measure_cache.bumpTextMeasureGeneration();
+            context.advance_calls = 0;
+            try std.testing.expectEqualDeep(expected, textBounds(text));
+            const cold_calls = context.advance_calls;
+            try std.testing.expect(cold_calls > 0);
+            try std.testing.expectEqualDeep(expected, textBounds(text));
+            try std.testing.expectEqual(cold_calls, context.advance_calls);
+        }
+    }
 }

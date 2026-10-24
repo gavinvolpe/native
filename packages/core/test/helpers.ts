@@ -73,3 +73,17 @@ export function checkOnly(source: string): CheckResult {
 export function ruleIds(result: CheckResult): string[] {
   return [...new Set(result.diagnostics.map((d) => d.id))];
 }
+
+/** Execute generated view TypeScript in the tests' shared classic-script
+ * realm. Use the pinned compiler: Node's strip-only API cannot lower enums
+ * or parameter properties. Keep module syntax until the existing realm
+ * adapter turns named imports into requires and exports into declarations. */
+export function transpileViewScript(source: string): string {
+  return ts.transpile(source, {
+    target: ts.ScriptTarget.ESNext,
+    module: ts.ModuleKind.ESNext,
+    verbatimModuleSyntax: true,
+  })
+    .replace(/^import \{([^}]*)\} from ("[^"]+");$/gm, (_all, names: string, spec: string) => `const {${names.replace(/ as /g, ": ")}} = require(${spec});`)
+    .replace(/^export /gm, "");
+}

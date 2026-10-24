@@ -478,6 +478,53 @@ pub fn findCanvasRenderOverrideIndex(overrides: []const canvas.CanvasRenderOverr
     return null;
 }
 
+/// Whether every ACTIVE render animation in the list is the view's
+/// caret blink: the frame pump may park the display-grid frame loop
+/// between blink edges only when the blink is the sole time-work (a
+/// spinner or skeleton sharing the view still needs display-cadence
+/// frames, and idle non-loop stragglers never reach this question).
+pub fn canvasRenderAnimationsOnlyCaretBlink(animations: []const canvas.CanvasRenderAnimation, blink_id: canvas.ObjectId, timestamp_ns: u64) bool {
+    if (blink_id == 0) return false;
+    var saw_blink = false;
+    for (animations) |animation| {
+        if (!canvasRenderAnimationActive(animation, timestamp_ns)) continue;
+        if (animation.id != blink_id) return false;
+        saw_blink = true;
+    }
+    return saw_blink;
+}
+
+/// The caret blink's next SWEEP BOUNDARY strictly after `timestamp_ns`:
+/// where the eased ping-pong lands exactly on an opacity extreme (1 at
+/// even sweeps, 0 at odd ones), so a frame scheduled there renders the
+/// platform-conventional on/off toggle without ever sampling the fade
+/// between. The post-activity solid lead is folded into the record's
+/// start, so the boundary one sweep past the start is the first visual
+/// edge; the start itself changes nothing (opacity still 1). Null for a
+/// degenerate record (zero sweep duration, no real edge left).
+pub fn canvasCaretBlinkNextEdgeNs(animation: canvas.CanvasRenderAnimation, timestamp_ns: u64) ?u64 {
+    if (animation.duration_ms == 0) return null;
+    const sweep_ns = @as(u64, animation.duration_ms) * std.time.ns_per_ms;
+    const sweeps_passed = (timestamp_ns -| animation.start_ns) / sweep_ns;
+    const sweeps_next = std.math.add(u64, sweeps_passed, 1) catch return null;
+    const advance_ns = std.math.mul(u64, sweeps_next, sweep_ns) catch return null;
+    return std.math.add(u64, animation.start_ns, advance_ns) catch return null;
+}
+
+/// How many of the blink's sweep boundaries have arrived at or before
+/// `timestamp_ns` (the first is one sweep past the record's start).
+/// The blink wake's honest due test compares this count at the fired
+/// timer against the count at the view's last frame clock: a boundary
+/// the last frame never covered is work, and timer jitter cannot fake
+/// or hide one — an early fire still counts the same boundaries as the
+/// last frame, and a late one counts the boundary it crossed.
+pub fn canvasCaretBlinkBoundariesPassed(animation: canvas.CanvasRenderAnimation, timestamp_ns: u64) u64 {
+    if (animation.duration_ms == 0) return 0;
+    const sweep_ns = @as(u64, animation.duration_ms) * std.time.ns_per_ms;
+    if (timestamp_ns < animation.start_ns + sweep_ns) return 0;
+    return (timestamp_ns - animation.start_ns) / sweep_ns;
+}
+
 pub fn canvasRenderOverrideNoop(override: canvas.CanvasRenderOverride) bool {
     return canvasRenderOverrideOpacityNoop(override.opacity) and canvasRenderOverrideTransformNoop(override.transform);
 }

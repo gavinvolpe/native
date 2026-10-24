@@ -466,7 +466,7 @@ pub fn generateSqliteSurface(
     base_env: *std.process.Environ.Map,
     framework_root: []const u8,
     install_editor_surface: bool,
-) ![]u8 {
+) ![:0]u8 {
     const sqlite_cli = try transpilerPath(allocator, io, framework_root, "src/sqlite_cli.ts");
     defer allocator.free(sqlite_cli);
     const runner = try tsRunnerPath(allocator, io, framework_root);
@@ -771,9 +771,9 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     // TypeScript toolchain to resolve exactly like check/build do.
     try ensureResolvedTranspiler(allocator, io, framework_root);
 
-    var sqlite_declarations: ?[]u8 = null;
+    var sqlite_declarations: ?[:0]u8 = null;
     defer if (sqlite_declarations) |path_value| allocator.free(path_value);
-    var sqlite_source: ?[]u8 = null;
+    var sqlite_source: ?[:0]u8 = null;
     defer if (sqlite_source) |path_value| allocator.free(path_value);
     for (options.capabilities) |capability| {
         if (!std.mem.eql(u8, capability, "sqlite")) continue;
@@ -1038,6 +1038,17 @@ pub fn selfHealEditorPackage(allocator: std.mem.Allocator, io: std.Io, framework
     if (outcome == .materialized) {
         std.debug.print("refreshed node_modules/@native-sdk/core (editor types for stock tsc; builds never read it)\n", .{});
     }
+}
+
+test "generated SQLite path ownership preserves the realpath sentinel" {
+    const Result = @typeInfo(@TypeOf(generateSqliteSurface)).@"fn".return_type.?;
+    const OwnedPath = @typeInfo(Result).error_union.payload;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "core.d.ts", .data = "" });
+    const owned: ?OwnedPath = try temporary.dir.realPathFileAlloc(std.testing.io, "core.d.ts", std.testing.allocator);
+    defer if (owned) |path| std.testing.allocator.free(path);
+    try std.testing.expect(std.fs.path.isAbsolute(owned.?));
 }
 
 test "the view checker verdict parses from its one stdout line" {

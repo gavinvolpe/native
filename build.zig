@@ -1351,14 +1351,16 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/declarations.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_provenance.test.ts"));
         native_api_tests.has_side_effects = true;
-        _ = native_api_tests.captureStdOut(.{});
-        _ = native_api_tests.captureStdErr(.{});
+        // Node reports failed test names and assertions on stdout too.
+        // Do not capture and discard the only diagnostics from this suite.
+        native_api_tests.stdio = .inherit;
         native_driver_step.dependOn(&native_api_tests.step);
         ts_core_e2e_step.dependOn(&native_api_tests.step);
         test_step.dependOn(&native_api_tests.step);
         ts_core_e2e_step.dependOn(&native_driver_run.step);
         test_step.dependOn(&native_driver_run.step);
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
+        b.step("test-ts-core-host", "Run the TypeScript-core host lifecycle and replay tests without example batteries").dependOn(&host_e2e_run.step);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         const runtime_model_step = b.step("test-ts-runtime-model", "Verify compiled model projections, lazy snapshots, persistence and effects");
         const runtime_model_host = filteredTestArtifact(b, ts_core_artifacts.host.root_module, "ts-runtime-model-host-tests", &.{"compiled host projects"});
@@ -1409,6 +1411,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-dispatch-policy", "Compare compiled app dispatch coordination with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-lifecycle-policy", "Compare compiled app lifecycle coordination and persistence with native behavior").dependOn(&persist_e2e_run.step);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
+        b.step("test-ts-markup-e2e", "Run the compiled markup application and replay battery").dependOn(&markup_e2e_run.step);
         const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
         const workbench_run = b.addRunArtifact(ts_core_artifacts.workbench);
         b.step("test-ts-workbench-e2e", "Compare compiled Workbench with complete native behavior").dependOn(&workbench_run.step);
@@ -1530,6 +1533,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&markdown_view_run.step);
         test_step.dependOn(&markdown_view_run.step);
         const feed_reader_e2e_run = b.addRunArtifact(ts_core_artifacts.feed_reader);
+        b.step("test-ts-feed-reader-e2e", "Run the real Feed Reader service and replay battery").dependOn(&feed_reader_e2e_run.step);
         const journal_codecs_run = b.addRunArtifact(ts_core_artifacts.journal_codecs);
         const journal_codecs_step = b.step("test-ts-journal-codecs", "Compare complete compiled journal codecs with the independent native reference");
         journal_codecs_step.dependOn(&journal_codecs_run.step);
@@ -1638,6 +1642,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&surface_layout_run.step);
         test_step.dependOn(&surface_layout_run.step);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
+        b.step("test-ts-services-child-e2e", "Run the out-of-process service carrier and replay battery").dependOn(&services_e2e_run.step);
         addTestStep(b, "test-ts-services-journal", "Verify devhost recordings replay through the packaged service carrier", filteredTestArtifact(b, ts_core_artifacts.services.root_module, "ts-services-journal-tests", &.{"a devhost-recorded service session"}));
         const markup_components_e2e_step = b.step("test-ts-markup-components-e2e", "Run root component-file compiled, interpreter, automation, and replay coverage");
         markup_components_e2e_step.dependOn(&markup_e2e_run.step);

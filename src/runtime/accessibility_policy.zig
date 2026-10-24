@@ -9,7 +9,7 @@ pub const Publication = enum { unchanged, deferred, publish };
 const roles = [_]canvas.WidgetRole{ .none, .group, .text, .link, .image, .button, .textbox, .tooltip, .dialog, .menu, .menuitem, .list, .listitem, .row, .grid, .gridcell, .tab, .checkbox, .radio, .radiogroup, .switch_control, .slider, .progressbar, .chart, .tree, .treeitem, .separator };
 const states = [_][]const u8{ "hovered", "pressed", "focused", "disabled", "selected", "required", "read_only", "invalid" };
 comptime {
-    if (roles.len != @typeInfo(canvas.WidgetRole).@"enum".fields.len or platform.max_widget_accessibility_nodes != 64) @compileError("update accessibility packet limits");
+    if (roles.len != @typeInfo(canvas.WidgetRole).@"enum".fields.len or platform.max_widget_accessibility_nodes != 1024) @compileError("update accessibility packet limits");
 }
 fn roleCode(role: canvas.WidgetRole) u32 {
     for (roles, 0..) |candidate, i| if (role == candidate) return @intCast(i);

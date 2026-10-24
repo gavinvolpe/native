@@ -292,7 +292,13 @@ pub const max_menu_key_bytes: usize = 32;
 pub const max_shortcuts: usize = 64;
 pub const max_shortcut_id_bytes: usize = 64;
 pub const max_shortcut_key_bytes: usize = 32;
-pub const max_widget_accessibility_nodes: usize = 64;
+/// The whole supported bounded widget tree a view can publish to
+/// assistive tech: the same budget as the per-view widget node limit, so
+/// every semantic node the app builds can land in the accessibility
+/// snapshot. This is an OWNED-memory budget (publishers allocate
+/// per-call), never a stack array — a 1024-node platform record on the
+/// stack would scale every publishing frame with the node count.
+pub const max_widget_accessibility_nodes: usize = 1024;
 pub const max_gpu_surface_packet_json_bytes: usize = 128 * 1024;
 /// Payload bound for the compact binary gpu-surface packet encoding
 /// (`present_gpu_surface_packet_binary_fn`). Sized so a worst-case
@@ -1659,6 +1665,19 @@ pub const reserved_timer_id_base: u64 = 0xffff_ffff_0000_0000;
 /// can fire the SAME timer a real gesture arms (`widget-hold`) without
 /// knowing the app type.
 pub const press_hold_timer_id: u64 = reserved_timer_id_base | 0x2e70_601d;
+
+/// Reserved framework timer id for the focused caret's blink wake. A
+/// view whose ONLY time-work is the caret blink parks the display-grid
+/// frame pump between blink sweep boundaries (a boundary frame lands on
+/// an opacity extreme, so the blink still reads as the conventional
+/// on/off toggle); the runtime arms this ONE-SHOT timer for the next
+/// boundary and the fired event is consumed inside
+/// `Runtime.dispatchPlatformEvent` — never journaled, never app-visible —
+/// invalidating the caret's dirty bounds and requesting exactly one
+/// frame. Blur removes the blink animation and nothing re-arms the
+/// timer, so the view goes idle. `focus loss -> idle` is this seam's
+/// contract.
+pub const caret_blink_timer_id: u64 = reserved_timer_id_base | 0x6361_7265;
 
 pub const TimerEvent = struct {
     id: u64,

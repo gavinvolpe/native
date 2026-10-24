@@ -6,7 +6,6 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { stripTypeScriptTypes } from "node:module";
 import { runInNewContext } from "node:vm";
 import { compileViewBundle, compileViewProgram, type ViewContract } from "../src/view_frontend.ts";
 import { appViewSources } from "../src/view_sources.ts";
@@ -16,10 +15,7 @@ import {
 } from "../src/view_reload.ts";
 import { watchViews } from "../src/view_reload_watch.ts";
 import * as textLibrary from "../sdk/text.ts";
-
-const strip = (source: string) => stripTypeScriptTypes(source, { mode: "transform" })
-  .replace(/^import \{([^}]*)\} from ("[^"]+");$/gm, (_all, names: string, spec: string) => `const {${names.replace(/ as /g, ": ")}} = require(${spec});`)
-  .replace(/^export /gm, "");
+import { transpileViewScript } from "./helpers.ts";
 
 const contract: ViewContract = {
   model: "Model",
@@ -39,7 +35,7 @@ function tempApp(markup: string): string {
 /** A development build's view code, as the stager appends it to the facade. */
 function developmentCore(markup: string): Record<string, any> {
   const { text, virtual } = compileViewProgram(markup, contract, {}, [], undefined, true);
-  const source = strip(text) + strip(viewReloadFacade(contract, viewReloadIdentity(contract, { windows: [], virtual }))) +
+  const source = transpileViewScript(text) + transpileViewScript(viewReloadFacade(contract, viewReloadIdentity(contract, { windows: [], virtual }))) +
     "\nglobalThis.native_view = native_view; globalThis.native_dev_view_prepare = native_dev_view_prepare; globalThis.native_dev_view_reset = native_dev_view_reset;\n";
   const context: Record<string, any> = {
     TextEncoder, TextDecoder, DataView, Uint8Array, Math, Number, String, Array, JSON, Error, Map,

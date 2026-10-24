@@ -144,9 +144,8 @@ const Harness = struct {
         self.harness.null_platform.gpu_surfaces = true;
         self.harness.null_platform.image_decode = true;
         self.harness.runtime.options.session_recorder = recorder;
-        self.app_state = try std.testing.allocator.create(App);
-        errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, core_options, appOptions());
+        self.app_state = try Adapter.create(std.testing.allocator, core_options, appOptions());
+        errdefer self.app_state.destroy();
         self.app_state.effects.executor = executor;
         self.app_state.effects.clock = self.clock.clock();
         self.app = self.app_state.app();
@@ -163,8 +162,7 @@ const Harness = struct {
     }
 
     fn destroy(self: *Harness) void {
-        self.app_state.deinit();
-        std.testing.allocator.destroy(self.app_state);
+        self.app_state.destroy();
         self.harness.destroy(std.testing.allocator);
         std.testing.allocator.destroy(self);
     }
@@ -709,10 +707,8 @@ test "a recorded soundboard session replays byte-identically with zero host call
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, appOptions());
-    defer app_state.deinit();
+    const app_state = try Adapter.create(std.testing.allocator, .{}, appOptions());
+    defer app_state.destroy();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
         .verify = true,

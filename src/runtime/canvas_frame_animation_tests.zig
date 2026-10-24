@@ -612,3 +612,110 @@ test "runtime classifies render animation final overrides for cleanup" {
         .to_transform = canvas.Affine.translate(8, 0),
     }));
 }
+
+test "runtime caret blink parks the frame pump and wakes at sweep boundaries; blur goes idle" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-caret-blink-scheduling", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 160, 36),
+        .placeholder = "Search",
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    // Click-focus the field: the caret arms its looping blink (solid
+    // 500 ms lead, then the 500 ms ping-pong sweeps — the first visual
+    // boundary is one sweep past the lead's end, i.e. input time + 1 s).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .timestamp_ns = 1_000_000_000,
+        .x = 90,
+        .y = 34,
+    } });
+    const view = &harness.runtime.views[0];
+    const blink_id = canvas.textCaretCommandId(.text_field, 2);
+    try std.testing.expectEqual(blink_id, view.canvas_widget_caret_blink_id);
+    try std.testing.expectEqual(@as(u64, 1_500_000_000), view.canvasRenderAnimations()[0].start_ns);
+
+    const storage = canvasFrameScratchStorage(&harness.runtime);
+    const requests_after_focus = harness.null_platform.gpu_surface_frame_request_count;
+    // Presenting the focus frame must NOT re-arm the display-grid pump
+    // (the pre-fix behavior requested a frame per present — the
+    // focused-input CPU burn): the blink is the view's only time-work,
+    // so the frame parks the pump and the framework's one-shot caret
+    // wake carries the next boundary instead.
+    _ = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 1, .timestamp_ns = 1_000_000_000 }, storage);
+    try std.testing.expectEqual(requests_after_focus, harness.null_platform.gpu_surface_frame_request_count);
+    const parked_wake = harness.null_platform.startedTimer(platform.caret_blink_timer_id).?;
+    try std.testing.expect(parked_wake.active);
+    try std.testing.expect(!parked_wake.repeats);
+    try std.testing.expectEqual(@as(u64, 1_000_000_000), parked_wake.interval_ns);
+
+    // A jitter-EARLY wake (before the boundary) is NOT due: no frame
+    // request, and the re-arm still targets the boundary ahead.
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(platform.caret_blink_timer_id, 1_800_000_000).?);
+    try std.testing.expectEqual(requests_after_focus, harness.null_platform.gpu_surface_frame_request_count);
+    const early_wake = harness.null_platform.startedTimer(platform.caret_blink_timer_id).?;
+    try std.testing.expect(early_wake.active);
+    try std.testing.expectEqual(@as(u64, 200_000_000), early_wake.interval_ns);
+
+    // The boundary wake requests EXACTLY one frame — the blink's on/off
+    // toggle renders at ~2 Hz instead of every display interval.
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(platform.caret_blink_timer_id, 2_000_000_000).?);
+    try std.testing.expectEqual(requests_after_focus + 1, harness.null_platform.gpu_surface_frame_request_count);
+    const boundary_wake = harness.null_platform.startedTimer(platform.caret_blink_timer_id).?;
+    try std.testing.expect(boundary_wake.active);
+    try std.testing.expectEqual(@as(u64, 500_000_000), boundary_wake.interval_ns);
+
+    // The boundary frame presents the fade-out extreme (the readable
+    // caret toggled off), reuses the field's cached text layout (no new
+    // layout uploads — bounded frame work), and parks the pump again.
+    view.gpu_timestamp_ns = 2_000_003_000;
+    const blink_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 2, .timestamp_ns = 2_000_003_000 }, storage);
+    try std.testing.expectEqual(@as(usize, 0), blink_frame.text_layout_cache_plan.uploadCount());
+    const presented_overrides = view.canvasFrameRenderOverrides();
+    try std.testing.expectEqual(@as(usize, 1), presented_overrides.len);
+    try std.testing.expectEqual(blink_id, presented_overrides[0].id);
+    try std.testing.expect(presented_overrides[0].opacity.? < 0.1);
+    try std.testing.expectEqual(requests_after_focus + 1, harness.null_platform.gpu_surface_frame_request_count);
+    const blink_wake = harness.null_platform.startedTimer(platform.caret_blink_timer_id).?;
+    try std.testing.expect(blink_wake.active);
+    try std.testing.expectEqual(@as(u64, 499_997_000), blink_wake.interval_ns);
+
+    // Blur drops the blink (the animation is removed, nothing arms
+    // another wake) — and a STALE wake left over from the parked pump
+    // neither requests a frame nor survives: the view goes idle.
+    view.focused = false;
+    _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_caret_blink_id);
+    try std.testing.expectEqual(@as(usize, 0), view.canvas_render_animation_count);
+    const requests_after_blur = harness.null_platform.gpu_surface_frame_request_count;
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(platform.caret_blink_timer_id, 2_600_000_000).?);
+    try std.testing.expectEqual(requests_after_blur, harness.null_platform.gpu_surface_frame_request_count);
+    try std.testing.expect(!harness.null_platform.startedTimer(platform.caret_blink_timer_id).?.active);
+    try std.testing.expect(harness.null_platform.fireTimer(platform.caret_blink_timer_id, 2_700_000_000) == null);
+}

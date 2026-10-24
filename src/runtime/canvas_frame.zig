@@ -31,6 +31,9 @@ pub const canvasWidgetKeyboardModifiers = canvas_frame_helpers.canvasWidgetKeybo
 pub const gpuInputHasTextCommandModifier = canvas_frame_helpers.gpuInputHasTextCommandModifier;
 pub const mergeCanvasRenderOverrides = canvas_frame_helpers.mergeCanvasRenderOverrides;
 pub const findCanvasRenderOverrideIndex = canvas_frame_helpers.findCanvasRenderOverrideIndex;
+pub const canvasRenderAnimationsOnlyCaretBlink = canvas_frame_helpers.canvasRenderAnimationsOnlyCaretBlink;
+pub const canvasCaretBlinkNextEdgeNs = canvas_frame_helpers.canvasCaretBlinkNextEdgeNs;
+pub const canvasCaretBlinkBoundariesPassed = canvas_frame_helpers.canvasCaretBlinkBoundariesPassed;
 pub const canvasRenderOverrideNoop = canvas_frame_helpers.canvasRenderOverrideNoop;
 pub const canvasRenderAnimationFinalOverrideNoop = canvas_frame_helpers.canvasRenderAnimationFinalOverrideNoop;
 pub const canvasRenderAnimationActive = canvas_frame_helpers.canvasRenderAnimationActive;
@@ -1262,6 +1265,12 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const admission = if (frame_options.render_cache_policy) |owner| coordination.plan(frame_facts, .admission, owner) else null;
             const canvas_changed = if (admission) |program| program.canvas_changed else self.views[index].canvas_revision != self.views[index].presented_canvas_revision;
             const canvas_surface_changed = if (admission) |program| program.surface_changed else !sizesEqual(self.views[index].presented_canvas_surface_size, frame_options.surface_size) or self.views[index].presented_canvas_scale != frame_options.scale;
+            // A no-op frame reuses the presented pixels: unchanged
+            // canvas and surface, no full repaint, and an EMPTY override
+            // set on both sides (a NONEMPTY override set always takes the
+            // plan path below — its cache plans carry the retain counts
+            // that keep the view's render caches warm, so an equal-set
+            // frame is deliberately NOT a no-op).
             const no_op = if (admission) |program| program.no_op else !frame_options.full_repaint and self.views[index].presented_canvas_valid and !canvas_changed and !canvas_surface_changed and frame_options.previous_render_overrides.len == 0 and frame_options.render_overrides.len == 0;
             if (no_op) {
                 const canvas_frame = canvas.CanvasFrame{
@@ -1600,7 +1609,24 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // window need no pump: both step on journaled input
                 // timestamps.
                 const tooltip_intent_armed = self.views[index].canvasTooltipIntentArmed();
-                if (render_animation_active or tooltip_intent_armed) {
+                // The caret blink is the ONE armed animation that does
+                // not need display-cadence frames: its eased ping-pong
+                // only lands on visible change at sweep boundaries (the
+                // exact 1/0 opacity extremes), so between boundaries a
+                // frame would re-plan an unchanged display list and
+                // re-present the same pixels — the focused-input CPU
+                // burn. While the blink is the view's ONLY time-work the
+                // display-grid pump parks and the framework's one-shot
+                // caret wake (`platform.caret_blink_timer_id`) requests
+                // exactly one frame per boundary; any other animation —
+                // spinner, skeleton, tooltip deadline — keeps the
+                // display-cadence pump below untouched.
+                const caret_blink_only = render_animation_active and !tooltip_intent_armed and canvasRenderAnimationsOnlyCaretBlink(
+                    self.views[index].canvasRenderAnimations(),
+                    self.views[index].canvas_widget_caret_blink_id,
+                    frame_options.timestamp_ns,
+                );
+                if (tooltip_intent_armed or (render_animation_active and !caret_blink_only)) {
                     self.invalidateFor(.state, self.views[index].frame);
                     // Invalidation keeps snapshots/diagnostics honest but
                     // does not itself wake an idle retained surface. The
@@ -1610,6 +1636,15 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     // their click endpoints and then park until unrelated
                     // input happens to wake the view.
                     try requestCanvasFrameForView(self, index);
+                } else if (caret_blink_only) {
+                    // Park the pump between blink boundaries: arm the
+                    // framework wake instead of the next display-grid
+                    // frame (a host with no timer lane falls back on the
+                    // pump so the blink never freezes).
+                    scheduleCaretBlinkWake(self, frame_options.timestamp_ns) catch |err| switch (err) {
+                        error.UnsupportedService => try requestCanvasFrameForView(self, index),
+                        else => return err,
+                    };
                 }
             } else {
                 self.views[index].recordCanvasFrame(canvas_frame);
@@ -1691,6 +1726,87 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // A frame event is now coming for this view — the deferred
             // accessibility settle logic keys off this.
             self.views[view_index].gpu_canvas_frame_requested = true;
+        }
+
+        /// Arm (or re-arm) the framework's ONE-SHOT caret-blink wake for
+        /// the next blink sweep boundary among the runtime's gpu-surface
+        /// views, counted from `reference_ns` — the timestamp of the
+        /// frame that just presented (the pump tail) or of the wake that
+        /// just fired (the wake handler), whichever arm is running. The
+        /// display-grid frame pump parks while the blink is a view's only
+        /// time-work, so this timer is what keeps the blink ticking.
+        /// `error.UnsupportedService` only when a qualifying blink exists
+        /// but the host has no timer lane — the caller falls back on the
+        /// display-grid pump so the blink never freezes.
+        fn scheduleCaretBlinkWake(self: *Runtime, reference_ns: u64) anyerror!void {
+            var delay_ns: ?u64 = null;
+            for (self.views[0..self.view_count]) |*view| {
+                if (view.kind != .gpu_surface) continue;
+                const blink_id = view.canvas_widget_caret_blink_id;
+                if (blink_id == 0) continue;
+                const view_now = @max(view.gpu_input_timestamp_ns, view.gpu_timestamp_ns);
+                if (!canvasRenderAnimationsOnlyCaretBlink(view.canvasRenderAnimations(), blink_id, view_now)) continue;
+                for (view.canvasRenderAnimations()) |animation| {
+                    if (animation.id != blink_id) continue;
+                    const base_ns = @max(reference_ns, view_now);
+                    const edge_ns = canvasCaretBlinkNextEdgeNs(animation, base_ns) orelse continue;
+                    const until_edge = edge_ns -| base_ns;
+                    delay_ns = if (delay_ns) |best| @min(best, until_edge) else until_edge;
+                    break;
+                }
+            }
+            if (delay_ns == null) {
+                // No view is blink-only anymore (blurred, or a spinner
+                // took over the display-cadence pump): retire a pending
+                // wake so a parked boundary cannot fire a stray frame.
+                if (self.canvas_caret_blink_wake_armed) {
+                    self.canvas_caret_blink_wake_armed = false;
+                    self.options.platform.services.cancelTimer(platform.caret_blink_timer_id) catch {};
+                }
+                return;
+            }
+            try self.options.platform.services.startTimer(platform.caret_blink_timer_id, @max(delay_ns.?, 1), false);
+            self.canvas_caret_blink_wake_armed = true;
+        }
+
+        /// The fired caret-blink wake (`platform.caret_blink_timer_id`,
+        /// consumed by `Runtime.dispatchPlatformEvent` before the app ever
+        /// sees it): advance every view whose blink crossed a sweep
+        /// boundary its last frame never rendered — invalidate the
+        /// caret's dirty bounds and request exactly ONE frame — then
+        /// re-arm the next boundary. Views whose blink was removed (blur)
+        /// or that share work with display-cadence animations are skipped:
+        /// the former has nothing to wake (and nothing re-arms, so the
+        /// view goes idle), the latter is already pumping.
+        pub fn handleCaretBlinkTimerWake(self: *Runtime, timestamp_ns: u64) anyerror!void {
+            self.canvas_caret_blink_wake_armed = false;
+            for (self.views[0..self.view_count], 0..) |*view, view_index| {
+                if (view.kind != .gpu_surface) continue;
+                const blink_id = view.canvas_widget_caret_blink_id;
+                if (blink_id == 0) continue;
+                const view_now = @max(view.gpu_input_timestamp_ns, view.gpu_timestamp_ns);
+                if (!canvasRenderAnimationsOnlyCaretBlink(view.canvasRenderAnimations(), blink_id, view_now)) continue;
+                for (view.canvasRenderAnimations()) |animation| {
+                    if (animation.id != blink_id) continue;
+                    // The due test is boundary arithmetic, not sampled
+                    // values: a boundary passed since the view's last
+                    // frame clock is unrendered work; timer jitter cannot
+                    // fake or hide one (an early fire still counts the
+                    // same boundaries as the last frame).
+                    if (canvasCaretBlinkBoundariesPassed(animation, timestamp_ns) <= canvasCaretBlinkBoundariesPassed(animation, view_now)) break;
+                    var wake_bounds = view.frame;
+                    for (view.canvas_render_animation_dirty_bounds[0..view.canvas_render_animation_dirty_bounds_count]) |entry| {
+                        if (entry.id == blink_id) {
+                            wake_bounds = entry.bounds orelse view.frame;
+                            break;
+                        }
+                    }
+                    self.invalidateFor(.state, wake_bounds);
+                    try requestCanvasFrameForView(self, view_index);
+                    break;
+                }
+            }
+            try scheduleCaretBlinkWake(self, timestamp_ns);
         }
 
         pub fn invalidateForCanvasChanges(self: *Runtime, view_frame: geometry.RectF, changes: []const canvas.DiffChange) void {
