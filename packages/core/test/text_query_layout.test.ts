@@ -56,13 +56,17 @@ test("uncapped selection folds every overflow line into the last caller slot", (
   const last = new DataView(r.selections[1]!.buffer); assert.equal(last.getUint32(0, true), 2); assert.equal(last.getUint32(4, true), text.length - 1); assert.equal(last.getFloat32(20, true), 259 * 12.5);
   const zero = packet(text, 3, 0); new DataView(zero.buffer).setUint32(20, text.length, true); const z = execute(zero); assert.equal(z.selections.length, 0); assert(z.widths.length > 260);
 });
-test("bounds retain the native scratch attempt and uncapped restart ordering", () => {
-  const text = "a\n".repeat(70), r = execute(packet(text, 1)); assert.equal(r.result.getUint32(272, true), 1);
-  // Every first-attempt line asks for its fitted advance and width; the
-  // 65th is measured before the reference restarts the complete run.
-  const starts = r.widths.filter(([kind, first, last]) => kind === 1 && first !== last).map(([, first]) => first);
-  assert.equal(starts[0], 0); assert.equal(starts[128], 128); assert.equal(starts[130], 0);
-  assert.equal(r.result.getFloat32(268, true), 879.5);
+test("bounds stream every line once across the former scratch boundary", () => {
+  for (const count of [0, 1, 64, 65, 70, 129]) {
+    const text = count === 0 ? "" : "a\n".repeat(count - 1) + "a";
+    const r = execute(packet(text, 1));
+    // Each nonempty line asks for its fitted advance and width exactly
+    // once; no prefix is planned again after the former 64-line boundary.
+    const starts = r.widths.filter(([kind, first, last]) => kind === 1 && first !== last).map(([, first]) => first);
+    assert.deepEqual(starts, Array.from({ length: count }, (_, index) => [index * 2, index * 2]).flat());
+    if (count > 0) assert.equal(r.result.getUint32(272, true), 1);
+  }
+  assert.equal(execute(packet("a\n".repeat(70), 1)).result.getFloat32(268, true), 879.5);
 });
 test("query envelopes reject corrupt metadata, reserved state and missing acknowledgments", () => {
   for (const at of [0, 1, 2, 4, 5, 6, 12, 24, 40, 44, 48, 80, 96, 440, 448, 514, 515, 520, 524, 556, 572, 592, 832]) {

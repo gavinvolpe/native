@@ -151,7 +151,7 @@ fn compareBounds(text: c.DrawText, batched: bool, ink_mode: u8, provider: bool) 
 }
 test "compiled text bounds preserve complete metrics ink unions and callback order" {
     _ = core.initialModel();
-    for ([_][]const u8{ "", "a", "italic overhang  ", "é🙂\nlast", "line\n" ** 70 }) |bytes| {
+    for ([_][]const u8{ "", "a", "italic overhang  ", "é🙂\nlast", "line\n" ** 63 ++ "line", "line\n" ** 64 ++ "line", "line\n" ** 70, "line\n" ** 128 ++ "line" }) |bytes| {
         for ([_]bool{ false, true }) |provider| for ([_]bool{ false, true }) |batched| for (0..4) |ink_mode| {
             var text = run(bytes);
             try compareBounds(text, batched, @intCast(ink_mode), provider);
